@@ -1,7 +1,8 @@
-use rpc;
+use rpc_nn;
 use error;
 use ::Result;
 use std;
+use std::borrow::Cow;
 
 use protocolpb::proto::ClientNamenodeProtocol::{
     GetListingRequestProto, GetListingResponseProto
@@ -10,13 +11,13 @@ use protocolpb::proto::ClientNamenodeProtocol::{
 use protocolpb::proto::hdfs::{HdfsFileStatusProto_FileType};
 
 //path: String, start_from: String, max_count: u32
-pub fn read_dir_listing(c: rpc::Connection, st: rpc::ConnectionState) -> Result<()> {
+pub fn read_dir_listing(c: rpc_nn::Connection, st: rpc_nn::ConnectionState) -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(2).collect();
 
     let src = match args.len() {
         1 => Ok(args[0].clone()),
-        _ => Err(error::Error::Other("invalid command line".to_owned()))
+        _ => Err(error::Error::Other(Cow::from("invalid command line")))
     }?;
 
     let mut q = GetListingRequestProto::new();

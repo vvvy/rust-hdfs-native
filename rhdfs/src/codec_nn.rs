@@ -1,12 +1,13 @@
 use protocolpb::proto::RpcHeader::{RpcRequestHeaderProto, RpcResponseHeaderProto,
                                    RpcResponseHeaderProto_RpcStatusProto,
-                                   RpcResponseHeaderProto_RpcErrorCodeProto,
+                                   //RpcResponseHeaderProto_RpcErrorCodeProto,
                                    RpcKindProto, RpcRequestHeaderProto_OperationProto};
 use protocolpb::proto::IpcConnectionContext::{IpcConnectionContextProto, UserInformationProto};
 use protocolpb::proto::ProtobufRpcEngine::RequestHeaderProto;
 use protobuf::{CodedOutputStream, CodedInputStream, Message, ProtobufResult};
 use byteorder::{BigEndian, WriteBytesExt};
 use ::Result;
+use util;
 
 use std::io::Write;
 
@@ -37,22 +38,15 @@ fn append_rpc_packet_2<M1: Message, M2: Message>(b: &mut Vec<u8>, m1: M1, m2: M2
 }
 
 fn append_rpc_packet_3<M1: Message, M2: Message, M3: Message>(b: &mut Vec<u8>, m1: M1, m2: M2, m3: M3) -> ProtobufResult<()> {
-    let mut c = Vec::new();
-    {
-        let mut os = CodedOutputStream::new(&mut c);
-        Ok(())
-            .and_then(|()| os.write_raw_varint32(m1.compute_size()))
-            .and_then(|()| m1.write_to_with_cached_sizes(&mut os))
-            .and_then(|()| os.write_raw_varint32(m2.compute_size()))
-            .and_then(|()| m2.write_to_with_cached_sizes(&mut os))
-            .and_then(|()| os.write_raw_varint32(m3.compute_size()))
-            .and_then(|()| m3.write_to_with_cached_sizes(&mut os))
-            .and_then(|()| os.flush())
-    }?;
-    b.write_u32::<BigEndian>(c.len() as u32)?;
-    b.write(&c)?;
-    b.flush()?;
+    let mut os = CodedOutputStream::new(b);
     Ok(())
+        .and_then(|()| os.write_raw_varint32(m1.compute_size()))
+        .and_then(|()| m1.write_to_with_cached_sizes(&mut os))
+        .and_then(|()| os.write_raw_varint32(m2.compute_size()))
+        .and_then(|()| m2.write_to_with_cached_sizes(&mut os))
+        .and_then(|()| os.write_raw_varint32(m3.compute_size()))
+        .and_then(|()| m3.write_to_with_cached_sizes(&mut os))
+        .and_then(|()| os.flush())
 }
 
 
@@ -99,16 +93,19 @@ pub fn handshake_packet(client_id: Vec<u8>, effective_user: String) -> ProtobufR
 
 // RPC definitions
 
-// A request packet:
-// +-----------------------------------------------------------+
-// |  uint32 length of the next three parts                    |
-// +-----------------------------------------------------------+
-// |  varint length + RpcRequestHeaderProto                    |
-// +-----------------------------------------------------------+
-// |  varint length + RequestHeaderProto                       |
-// +-----------------------------------------------------------+
-// |  varint length + Request                                  |
-// +-----------------------------------------------------------+
+/// Build a request packet.
+/// The namenode request has the following framing:
+/// ```text
+/// +----------------------------------------------------------------+
+/// |  uint32 length of the next three parts (written in RPC framer) |
+/// +----------------------------------------------------------------+
+/// |  varint length + RpcRequestHeaderProto                         |
+/// +----------------------------------------------------------------+
+/// |  varint length + RequestHeaderProto                            |
+/// +----------------------------------------------------------------+
+/// |  varint length + Request                                       |
+/// +----------------------------------------------------------------+
+/// ```
 
 pub fn request_packet<M: Message>(
     client_id: Vec<u8>, call_id: i32,
@@ -131,29 +128,37 @@ pub fn request_packet<M: Message>(
     Ok(b)
 }
 
-// A response from the namenode:
-// +-----------------------------------------------------------+
-// |  uint32 length of the next two parts                      |
-// +-----------------------------------------------------------+
-// |  varint length + RpcResponseHeaderProto                   |
-// +-----------------------------------------------------------+
-// |  varint length + Response                                 |
-// +-----------------------------------------------------------+
+/// Parses a response from the namenode.
+/// 'm' is an empty template M to be filled in and returned.
+/// ```text
+/// +-----------------------------------------------------------+
+/// |  uint32 length of the next two parts (read in RPC framer) |
+/// +-----------------------------------------------------------+
+/// |  varint length + RpcResponseHeaderProto                   |
+/// +-----------------------------------------------------------+
+/// |  varint length + Response                                 |
+/// +-----------------------------------------------------------+
+/// ```
 
 pub fn response_packet<M: Message>(d: Vec<u8>, mut m: M) -> Result<M> {
     //"length of the next two parts" has been read
     let mut i = CodedInputStream::from_bytes(&d);
     let sa = i.read_raw_varint64()? as usize;
-    let mut b =  Vec::with_capacity(sa);
-    b.resize(sa, 0);
+    let mut b = util::vector_of_size(sa);
     i.read(&mut b)?;
     let mut rrh = RpcResponseHeaderProto::new();
     rrh.merge_from(&mut CodedInputStream::from_bytes(&b))?;
 
+    #[inline]
+    fn to_vector_of_size<T: Default + Clone>(v: &mut Vec<T>, n: usize) -> () {
+        v.resize(n, T::default());
+        v.shrink_to_fit();
+    }
+
     //check for error
     if rrh.get_status() == RpcResponseHeaderProto_RpcStatusProto::SUCCESS {
         let sb = i.read_raw_varint64()? as usize;
-        b.resize(sb, 0);
+        to_vector_of_size(&mut b, sb);
         i.read(&mut b)?;
         m.merge_from(&mut CodedInputStream::from_bytes(&b))?;
         Ok(m)
@@ -173,7 +178,6 @@ fn decode_status(st: RpcResponseHeaderProto_RpcStatusProto) -> String {
     match st {
         RpcResponseHeaderProto_RpcStatusProto::SUCCESS => "SUCCESS",
         RpcResponseHeaderProto_RpcStatusProto::ERROR => "ERROR",
-        RpcResponseHeaderProto_RpcStatusProto::FATAL => "FATAL",
-        _ => "?",
+        RpcResponseHeaderProto_RpcStatusProto::FATAL => "FATAL"
     }.to_owned()
 }

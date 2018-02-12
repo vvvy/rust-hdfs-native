@@ -1,3 +1,5 @@
+//! ClientNamenodeProtocol RPC definitions
+
 use std::net::{SocketAddr/*, Shutdown*/};
 
 use futures::Future;
@@ -6,10 +8,12 @@ use tokio_core::reactor::Core;
 use tokio_io;
 use byteorder::{ByteOrder, BigEndian};
 use ::Result;
-use rpc_codec::{handshake_packet, request_packet, response_packet};
+use util;
+use codec_nn::{handshake_packet, request_packet, response_packet};
 
-use protobuf::Message;//{CodedOutputStream, CodedInputStream, Message, ProtobufResult};
+use protobuf::Message;
 
+/// Hand shake with a namenode. Note that no response in supposed from the server on success.
 fn handshake(core: &mut Core, socket: TcpStreamNew, pkt: Vec<u8>) -> Result<TcpStream> {
     let request =
         socket.and_then(|socket| {
@@ -22,18 +26,22 @@ fn handshake(core: &mut Core, socket: TcpStreamNew, pkt: Vec<u8>) -> Result<TcpS
     Ok(socket)
 }
 
+/// Send a request packet (pkt) and receive a response from the namenode
 fn call(core: &mut Core, socket: TcpStream, pkt: Vec<u8>) -> Result<(TcpStream, Vec<u8>)> {
     trace!("< {:?}", pkt);
-    //TODO: move code that outputs packet length here from append_rpc_packet...
-    let request = tokio_io::io::write_all(socket, pkt);
+    let mut pkt_len = [0u8; 4];
+    BigEndian::write_u32(&mut pkt_len, pkt.len() as u32);
+
+    let request =
+        tokio_io::io::write_all(socket, &pkt_len)
+            .and_then(|(socket, _) |tokio_io::io::write_all(socket, pkt));
 
     let response =
         request.and_then(|(socket, _request)| {
             tokio_io::io::read_exact(socket, [0u8; 4])
                 .and_then(|(socket, b)| {
                     let packet_len = BigEndian::read_u32(&b);
-                    let mut r  = Vec::new();
-                    r.resize(packet_len as usize, 0u8);
+                    let r  = util::vector_of_size(packet_len as usize);
                     tokio_io::io::read_exact(socket, r)
                 })
         });
@@ -43,12 +51,13 @@ fn call(core: &mut Core, socket: TcpStream, pkt: Vec<u8>) -> Result<(TcpStream, 
     Ok((socket, data))
 }
 
+/// Immutable connection data
 pub struct Connection {
     client_id: Vec<u8>,
     effective_user: String
 }
 
-/// TCP stream and next call id
+/// Mutable and pass-through connection data
 pub struct ConnectionState {
     socket: TcpStream,
     call_id: i32,
