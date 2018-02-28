@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::fmt::Debug;
 
 use tokio_io::codec::{Decoder, Encoder};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BytesMut, BufMut};
 use byteorder::{ByteOrder, BigEndian};
 
 use util::*;
@@ -184,7 +184,7 @@ impl<H, T, F> Decoder for PairDecoder<H, T, F> where
     type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        logging_fsm_turn(self, |s| match s {
+        logging_fsm_turn("PairDecoder", self, |s| match s {
             &mut PairDecoder::H(ref mut h, ref f) =>
                 match h.decode(src) {
                     Ok(Some(hi)) => match f.tail_f(hi) {
@@ -345,6 +345,25 @@ pub fn elen_u16(n: usize) -> Result<U16W> {
         Err(app_error!{ codec"u16: length overflow" })
     }
 }
+
+pub mod encoder {
+    use super::*;
+
+    pub fn varint_u32<TI>() -> PduEncoder<VarIntU32Encoder, TI> {
+        PduEncoder::new(VarIntU32Encoder, elen_varint_u32)
+    }
+}
+
+pub mod decoder {
+    use super::*;
+    pub fn varint_u32<TI: PduDes>() -> PduDecoder<VarIntU32Decoder, TI> {
+        pdu_decoder(
+            VarIntU32Decoder::new(),
+            |sz| sz as usize
+        )
+    }
+}
+
 
 #[derive(Debug)]
 pub struct U32W {

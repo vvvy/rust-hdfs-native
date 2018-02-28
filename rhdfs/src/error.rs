@@ -3,6 +3,7 @@ use std::error::Error as StdError;
 use std::fmt::{Display, Formatter, Result};
 use std::borrow::Cow;
 use protobuf::ProtobufError;
+use protocolpb::proto::datatransfer::Status as DtStatus;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
@@ -13,6 +14,7 @@ pub enum Error {
     RPC { protocol: String, status: String, message: String, code: String, exception_class: String },
     ShortBuffer(usize),
     Codec(Cow<'static, str>),
+    DataTransfer(DtStatus, String),
     Other(Cow<'static, str>)
 }
 
@@ -20,6 +22,8 @@ pub enum Error {
 #[macro_export]
 macro_rules! app_error {
     {codec $e:expr} => { Error::Codec(Cow::from($e)) };
+    {dt $s:expr, $m:expr} => { Error::DataTransfer($s, $m.to_owned()) };
+    {unreachable} => { Error::Other(Cow::from("got to an unreachable point in code")) };
     {other $e:expr} => { Error::Other(Cow::from($e)) };
 }
 
@@ -31,6 +35,7 @@ impl StdError for Error {
             &Error::RPC { ref message, protocol:_, status: _, code: _, exception_class: _ } => message,
             &Error::ShortBuffer(_) => "Buffer short",
             &Error::Codec(ref s) => s,
+            &Error::DataTransfer(_, ref s) => s,
             &Error::Other(ref s) => s
         }
     }
@@ -42,6 +47,7 @@ impl StdError for Error {
             &Error::RPC { message: _, protocol:_, status: _, code: _, exception_class: _} |
                 &Error::ShortBuffer(_) |
                 &Error::Codec(_) |
+                &Error::DataTransfer(_, _) |
                 &Error::Other(_)
                     => None
         }
@@ -62,6 +68,8 @@ impl Display for Error {
                 write!(f, "Buffer short by({})", n),
             &Error::Codec(ref s) =>
                 write!(f, "CodecError: {}", s),
+            &Error::DataTransfer(ref s, ref m) =>
+                write!(f, "DataTransferError: {:?} `{}`", s, m),
             &Error::Other(ref s) =>
                 write!(f, "Error: {}", s)
         }

@@ -1,59 +1,13 @@
-//! Rust native HDFS client
+//! rhdfs: a Rust equivalent to `hdfs dfs`
 
 #[macro_use] extern crate log;
 extern crate env_logger;
 
-extern crate futures;
-extern crate native_tls;
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_proto;
-extern crate tokio_service;
-
-extern crate protobuf;
-extern crate byteorder;
-extern crate bytes;
-extern crate protocolpb;
-
-#[macro_use] mod error;
-mod result;
-mod codec_nn;
-mod codec_dt;
-mod rpc_nn;
-mod rpc_dt;
-mod protocol_dt;
-mod hdfs;
-mod cmdln;
-mod codec_tools;
-mod protobuf_api;
-mod util;
+#[macro_use] extern crate rhdfs;
 
 use std::borrow::Cow;
-use std::net::ToSocketAddrs;
-use tokio_core::reactor::Core;
+use rhdfs::*;
 
-pub use error::*;
-pub use result::Result;
-
-
-
-fn do_things<F: FnOnce(rpc_nn::Connection, rpc_nn::ConnectionState) -> Result<()>>(f: F) -> Result<()> {
-    let core = Core::new()?;
-
-    let addr = "127.0.0.1:8020".to_socket_addrs()?.next().ok_or(error::Error::Other(Cow::from("NN host not found")))?;
-
-    let c = rpc_nn::Connection::new(vec![1, 2, 3, 4, 4, 3, 2, 1], "cloudera".to_owned());
-
-    let st = c.connect(core, addr)?;
-
-    f(c, st)?;
-    Ok(())
-}
-
-fn usage() -> ! {
-    println!("USAGE: TODO");
-    std::process::exit(1);
-}
 
 fn main() {
     env_logger::init();
@@ -62,9 +16,9 @@ fn main() {
 
     let r = match ocmd {
         Some(ref cmd) => match cmd.as_ref() {
-            "ls" => do_things(hdfs::read_dir_listing),
-            "dt" => codec_dt::do_things(),
-            other => Err(error::Error::Other(Cow::from(format!("Invalid command `{}`", other))))
+            "ls" => ls(),
+            "dt" => read_block(),
+            o => Err(app_error!(other format!("Invalid command `{}`", o)))
         },
         None => usage()
     };
@@ -75,5 +29,70 @@ fn main() {
             eprintln!("{}", e);
             std::process::exit(2)
         }
+    }
+}
+
+fn usage() -> ! {
+    println!("USAGE: TODO");
+    std::process::exit(1);
+}
+
+
+
+/// '--sw=arg' => '--sw' 'arg'
+/// '-abc' => -a -b -c
+pub fn convert_arg(v: String) -> Vec<String> {
+    use std::iter::FromIterator;
+    if v.starts_with("--") {
+        v.splitn(2, "=").map(|r| r.to_string()).collect()
+    } else if v.starts_with("-") && v != "-" {
+        v.chars().skip(1).map(|c| String::from_iter(vec!['-', c])).collect()
+    } else {
+        vec![v]
+    }
+}
+
+/// Prints two-part message to stderr and exits
+pub fn error_exit(msg: &str, detail: &str) -> ! {
+    eprint!("Error: {}", msg);
+    if detail.is_empty() {
+        eprintln!()
+    } else {
+        eprintln!(" ({})", detail);
+    }
+    std::process::exit(1)
+}
+
+/// Expect2 function
+pub trait Expect2<T> {
+    /// Same as Result::expect but the error message is brief and not intimidating
+    fn expect2(self, msg: &str) -> T;
+}
+
+impl<T, E: std::error::Error> Expect2<T> for std::result::Result<T, E> {
+    fn expect2(self, msg: &str) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => error_exit(msg, e.description())
+        }
+    }
+}
+
+/// Parses command line for 0- and 1-argument options.
+/// `f` consumes the current state and a command line word, and produces the new state.
+/// State transitions: an option taking no argument: `(None, "--opt") -> None`;
+/// An option taking an arg: `(None, "--opt") -> Some("--opt")`, then `(Some("--opt"), "arg") -> None`.
+pub fn parse_cmdln<F>(f: F) where F: FnMut(Option<String>, String) -> Option<String> {
+    match std::env::args().skip(2).flat_map(convert_arg).fold(None, f) {
+        None => (),
+        Some(ref e) => error_exit(&format!("Invalid cmd line at `{}`<EOL>", e), "unknown option")
+    }
+}
+
+pub fn bool_opt(s: String) -> bool {
+    match s.as_ref() {
+        "true"|"+"|"yes" => true,
+        "false"|"-"|"no" => false,
+        v => panic!("invalid bool value '{}'", v)
     }
 }
