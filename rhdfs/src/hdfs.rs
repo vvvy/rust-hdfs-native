@@ -4,11 +4,11 @@ use ::Result;
 use std;
 use std::borrow::Cow;
 
-use protocolpb::proto::ClientNamenodeProtocol::{
+use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
     GetListingRequestProto, GetListingResponseProto
 };
 
-use protocolpb::proto::hdfs::{HdfsFileStatusProto_FileType};
+use protocolpb::proto::hdfs::hdfs::{HdfsFileStatusProto_FileType};
 
 //path: String, start_from: String, max_count: u32
 pub fn read_dir_listing(c: rpc_nn::Connection, st: rpc_nn::ConnectionState) -> Result<()> {

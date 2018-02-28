@@ -3,7 +3,7 @@ use std::error::Error as StdError;
 use std::fmt::{Display, Formatter, Result};
 use std::borrow::Cow;
 use protobuf::ProtobufError;
-use protocolpb::proto::datatransfer::Status as DtStatus;
+use protocolpb::proto::hdfs::datatransfer::Status as DtStatus;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 

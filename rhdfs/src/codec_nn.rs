@@ -1,9 +1,9 @@
-use protocolpb::proto::RpcHeader::{RpcRequestHeaderProto, RpcResponseHeaderProto,
+use protocolpb::proto::hadoop::RpcHeader::{RpcRequestHeaderProto, RpcResponseHeaderProto,
                                    RpcResponseHeaderProto_RpcStatusProto,
                                    //RpcResponseHeaderProto_RpcErrorCodeProto,
                                    RpcKindProto, RpcRequestHeaderProto_OperationProto};
-use protocolpb::proto::IpcConnectionContext::{IpcConnectionContextProto, UserInformationProto};
-use protocolpb::proto::ProtobufRpcEngine::RequestHeaderProto;
+use protocolpb::proto::hadoop::IpcConnectionContext::{IpcConnectionContextProto, UserInformationProto};
+use protocolpb::proto::hadoop::ProtobufRpcEngine::RequestHeaderProto;
 use protobuf::{CodedOutputStream, CodedInputStream, Message, ProtobufResult};
 use byteorder::{BigEndian, WriteBytesExt};
 use ::Result;

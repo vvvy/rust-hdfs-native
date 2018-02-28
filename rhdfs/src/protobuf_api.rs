@@ -33,8 +33,8 @@ impl<M> PduDes for M where M: MessageStatic {
 
 #[test]
 fn test_pdu_ser_for_message() {
-    use protocolpb::proto::datatransfer::*;
-    use protocolpb::proto::hdfs::*;
+    use protocolpb::proto::hdfs::datatransfer::*;
+    use protocolpb::proto::hdfs::hdfs::*;
 
     let mut b =  BytesMut::with_capacity(1024);
     let mut orbp = OpReadBlockProto::new();
@@ -63,7 +63,7 @@ fn test_pdu_ser_for_message() {
     ]));
 }
 
-pub use protocolpb::proto::datatransfer::{
+pub use protocolpb::proto::hdfs::datatransfer::{
     OpReadBlockProto,
     BlockOpResponseProto,
     Status as DtStatus,
@@ -75,7 +75,7 @@ pub use protocolpb::proto::datatransfer::{
     PacketHeaderProto
 };
 
-pub use protocolpb::proto::hdfs::{
+pub use protocolpb::proto::hdfs::hdfs::{
     ExtendedBlockProto,
     ChecksumTypeProto
 };
@@ -147,7 +147,7 @@ macro_rules! pb_decons {
 
 #[test]
 fn test_pbapi() {
-    use protocolpb::proto::hdfs::ExtendedBlockProto;
+    use protocolpb::proto::hdfs::hdfs::ExtendedBlockProto;
     let ebp = pb_cons!(ExtendedBlockProto,
           pool_id: "abs".to_owned(),
           block_id: 123,

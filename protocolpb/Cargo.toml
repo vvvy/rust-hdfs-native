@@ -2,6 +2,7 @@
 name = "protocolpb"
 version = "0.1.0"
 authors = ["Valery Vybornov <vvybornov@gmail.com>"]
+build = "build.rs"
 
 [dependencies]
 protobuf = "1.4"
