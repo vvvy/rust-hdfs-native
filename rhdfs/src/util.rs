@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 
 /// Vector of `n` default values
@@ -97,18 +97,19 @@ pub fn logging_fsm_turn<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut
 //----------------
 use std::fmt::{Formatter, Result};
 
-/// Compact debug writer
+/// Compact binary writer
 /// If a slice is longer than `T` bytes, writes only `LH` initial bytes followed by
 /// omitted/total bytes count and trailing `LT` bytes
-pub struct CDebug<'a>(pub &'a [u8]);
+/// Also writes string representation along with byte dump
+pub struct CBinary<'a>(pub &'a [u8]);
 
-impl<'a> CDebug<'a> {
-    const T: usize = 20;
-    const LH: usize = 8;
-    const LT: usize = 8;
+impl<'a> CBinary<'a> {
+    const T: usize = 36;
+    const LH: usize = 16;
+    const LT: usize = 16;
 }
 
-impl<'a> Debug for CDebug<'a> {
+impl<'a> Display for CBinary<'a> {
     fn fmt(&self, fmt: &mut Formatter) -> Result {
         fn cw(a: &[u8], fmt: &mut Formatter) -> Result {
             write!(fmt, "b\"")?;
@@ -143,41 +144,34 @@ impl<'a> Debug for CDebug<'a> {
         }
 
         let l = self.0.len();
-        let (a, b) = if l <= CDebug::T {
+        let (a, b) = if l <= CBinary::T {
             (self.0, None)
         } else {
-            (&self.0[..CDebug::LH], Some((
-                l - CDebug::LH - CDebug::LT,
-                &self.0[l - CDebug::LT..]
+            (&self.0[..CBinary::LH], Some((
+                l - CBinary::LH - CBinary::LT,
+                &self.0[l - CBinary::LT..]
              )))
         };
 
+        write!(fmt, "[")?;
         cw(a, fmt)?;
+        write!(fmt, " ")?;
         xw(a, fmt)?;
         if let Some((c, b)) = b {
-            write!(fmt, " <{}/{} bytes> ", c, l)?;
+            write!(fmt, "<{}/{} bytes> ", c, l)?;
             cw(b, fmt)?;
+            write!(fmt, " ")?;
             xw(b, fmt)?;
         }
+        write!(fmt, "]")?;
         Ok(())
     }
 }
 
 //----------------
 
-/*
-enum OwnedList<T> {
-    Node(T, Box<OwnedList<T>>),
-    Nil
-}
-
-impl<T> OwnedList<T> {
-    fn empty() -> Self { OwnedList::Nil }
-}
-*/
-
-
 #[cfg(test)]
+#[macro_use]
 pub mod test {
     use std::fmt::{Display, Formatter, Result};
 
@@ -225,7 +219,7 @@ pub mod test {
     }
 
 
-    pub struct HexSlice<'a>(&'a [u8]);
+    pub struct HexSlice<'a>(pub &'a [u8]);
 
     impl<'a> HexSlice<'a> {
         pub fn new<T>(data: &'a T) -> HexSlice<'a>
@@ -243,6 +237,72 @@ pub mod test {
             Ok(())
         }
     }
+
+    #[macro_export]
+    macro_rules! assert_enum_variant {
+        ($e: expr, $p:pat) => { match $e {
+            $p => (),
+            other => panic!("assertion failed: expected {}, got {:?}", stringify!($p), other)
+        }};
+    }
+
+
+    /// Protocols Test Kit
+    #[macro_use]
+    pub mod ptk {
+        use util::*;
+        use util::test::*;
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+        use std::io::{Read, Write};
+
+        /// Test Script Instruction
+        pub enum TsInstr {
+            Expect(&'static str),
+            Send(&'static str)
+        }
+
+        macro_rules! test_script_cmd {
+            { expect $v:expr } => { TsInstr::Expect($v) };
+            { send $v:expr } => { TsInstr::Send($v) };
+        }
+
+        #[macro_export]
+        macro_rules! test_script {
+            { $($c:ident $v:expr),* } => { vec![$(test_script_cmd!($c $v)),*] };
+        }
+
+        fn expect(conn: &mut TcpStream, e: Vec<u8>) {
+            let mut v = vector_of_size(e.len());
+            let r = conn.read_exact(&mut v);
+            assert!(r.is_ok());
+            assert_eq!(v, e);
+        }
+
+        fn send(conn: &mut TcpStream, e: Vec<u8>) {
+            let r = conn.write(&e);
+            assert_eq!(r.ok(), Some(e.len()));
+        }
+
+        /// gets addr as `"host:port"` and test script
+        pub fn spawn_test_server<'a>(bind_addr: &'a str, script: Vec<TsInstr>) -> thread::JoinHandle<()> {
+            let listener = TcpListener::bind(bind_addr).unwrap();
+
+            let t = thread::spawn(move || {
+                let mut conn = listener.incoming().next().unwrap().unwrap();
+
+                for instr in script {
+                    match instr {
+                        TsInstr::Expect(s) => expect(&mut conn, s.to_bytes()),
+                        TsInstr::Send(s) => send(&mut conn, s.to_bytes())
+                    }
+                }
+            });
+
+            t
+        }
+    }
+
 
 }
 

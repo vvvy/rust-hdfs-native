@@ -51,7 +51,6 @@ impl PduSer for BytesMutW {
     }
 }
 
-
 pub trait FixedSizePdu {
     const PDU_SIZE: usize;
 }
@@ -110,6 +109,121 @@ impl Encoder for VarIntU32Encoder {
     }
 }
 
+/// returns number of bytes needed to encode the argument using varint encoding
+pub fn varint_encoded_len(n: u32) -> u32 {
+    if n == 0 { 1 } else { (32 - n.leading_zeros() - 1)/7 + 1 }
+}
+
+/*
+#[test]
+fn test_varint_encoded_len() {
+    use std::ops::Shl;
+    for x in 1..4 {
+        for n in 1u32.shl(x*7 - 1)..1u32.shl(x*7 + 1) {
+            let mut b = BytesMut::with_capacity(10);
+            VarIntU32Encoder.encode(n, &mut b);
+            assert_eq!(b.len(), varint_encoded_len(n) as usize)
+        }
+    }
+}
+*/
+
+/// Two PDUs in sequence, each preceded by varint length. The latter is optional
+#[derive(Debug)]
+pub struct BiPdu<A, B> {
+    pub a: A,
+    pub b: Option<B>
+}
+
+impl<A, B> BiPdu<A, B> {
+    pub fn new(a: A, b: Option<B>) -> BiPdu<A, B> { BiPdu { a, b }}
+    pub fn new_one(a: A) -> BiPdu<A, B> { BiPdu { a, b: None }}
+    pub fn new_both(a: A, b: B) -> BiPdu<A, B> { BiPdu { a, b: Some(b) }}
+}
+
+fn force_complete<T>(r: Result<Option<T>>) -> Result<T> {
+    r.and_then(|w| match w {
+        Some(r) => Ok(r),
+        None => Err(app_error!(codec "Partial data on decoding"))
+    })
+}
+
+impl<A, B> PduDes for BiPdu<A, B> where A: PduDes + Debug, B: PduDes + Debug {
+    fn from_bytes(mut src: BytesMut) -> Result<Self> {
+        let a = force_complete(decoder::varint_u32().decode(&mut src))?;
+        let b = if !src.is_empty() {
+            Some(force_complete(decoder::varint_u32().decode(&mut src))?)
+        } else {
+            None
+        };
+
+        if src.is_empty() {
+            Ok(BiPdu {a, b})
+        } else {
+            Err(app_error!(codec "Trailing garbage"))
+        }
+    }
+}
+
+
+impl<A, B> PduSer for BiPdu<A, B> where A: PduSer, B: PduSer {
+
+    fn serialized_len(&mut self) -> usize {
+        #[inline]
+        fn w_len(l: usize) -> usize { l + varint_encoded_len(l as u32) as usize }
+
+        let (la, lb) = (
+            w_len(self.a.serialized_len()),
+            match &mut self.b {
+                &mut Some(ref mut w) => w_len(w.serialized_len()),
+                &mut None => 0
+            }
+        );
+
+        la + lb
+    }
+
+    fn encode(self, b: &mut BytesMut) -> Result<()> {
+        let _ = encoder::varint_u32().encode(self.a, b)?;
+        if let Some(w) = self.b {
+            let _ = encoder::varint_u32().encode(w, b)?;
+        }
+        Ok(())
+    }
+}
+
+/// Three PDUs in sequence, each preceded by varint length
+pub struct TriPdu<A, B, C> {
+    a: A,
+    b: B,
+    c: C
+}
+
+impl<A, B, C> TriPdu<A, B, C> {
+    pub fn new(a: A, b: B, c: C) -> TriPdu<A, B, C> { TriPdu { a, b, c }}
+}
+
+impl<A, B, C> PduSer for TriPdu<A, B, C> where A: PduSer, B: PduSer, C: PduSer {
+    fn serialized_len(&mut self) -> usize {
+        let (la, lb, lc) = (
+            self.a.serialized_len(),
+            self.b.serialized_len(),
+            self.c.serialized_len(),
+        );
+
+        la + lb + lc +
+            varint_encoded_len(la as u32) as usize +
+            varint_encoded_len(lb as u32) as usize +
+            varint_encoded_len(lc as u32) as usize
+    }
+
+    fn encode(self, b: &mut BytesMut) -> Result<()> {
+        let _ = encoder::varint_u32().encode(self.a, b)?;
+        let _ = encoder::varint_u32().encode(self.b, b)?;
+        let _ = encoder::varint_u32().encode(self.c, b)?;
+        Ok(())
+    }
+}
 
 /// Reads `sz` bytes, then deserializes it via `PduDes`
 #[derive(Debug)]
@@ -232,7 +346,7 @@ where
 {
     pdu_decoder(FixedSizeDecoder::new_sized(head_sz), f)
 }
-pub fn pdu_pair_decoder<HI, TI>(/*f: fn(HI) -> usize*/) -> PduPairDecoder<HI, TI>
+pub fn pdu_pair_decoder<HI, TI>() -> PduPairDecoder<HI, TI>
     where
         HI: PduDes + Debug + FixedSizePdu + Into<usize>,
         TI: PduDes + Debug
@@ -334,7 +448,7 @@ pub fn elen_u32(n: usize) -> Result<U32W> {
     if n <= u32::max_value() as usize {
         Ok(U32W::from(n as u32))
     } else {
-        Err(app_error!{ codec"u32: length overflow" })
+        Err(app_error!{ codec "u32: length overflow" })
     }
 }
 
@@ -342,7 +456,7 @@ pub fn elen_u16(n: usize) -> Result<U16W> {
     if n <= u16::max_value() as usize {
         Ok(U16W::from(n as u16))
     } else {
-        Err(app_error!{ codec"u16: length overflow" })
+        Err(app_error!{ codec "u16: length overflow" })
     }
 }
 
@@ -351,6 +465,14 @@ pub mod encoder {
 
     pub fn varint_u32<TI>() -> PduEncoder<VarIntU32Encoder, TI> {
         PduEncoder::new(VarIntU32Encoder, elen_varint_u32)
+    }
+
+    pub fn fixed_u32<TI>() -> PduPairEncoder<U32W, TI> {
+        PduPairEncoder::<U32W, TI> {
+            h: PhantomData,
+            t: PhantomData,
+            f: elen_u32
+        }
     }
 }
 
@@ -361,6 +483,9 @@ pub mod decoder {
             VarIntU32Decoder::new(),
             |sz| sz as usize
         )
+    }
+    pub fn fixed_u32<TI: PduDes + Debug>() -> PduPairDecoder<U32W, TI> {
+        pdu_pair_decoder::<U32W, TI>()
     }
 }
 
@@ -400,7 +525,7 @@ impl PduSer for U32W {
     fn serialized_len(&mut self) -> usize { U32_BYTES }
     fn encode(self, b: &mut BytesMut) -> Result<()> {
         b.reserve(4);
-        BigEndian::write_u32(b, self.v);
+        b.put_u32::<BigEndian>(self.v);
         Ok(())
     }
 }
@@ -439,7 +564,7 @@ impl PduSer for U16W {
     fn serialized_len(&mut self) -> usize { U16_BYTES }
     fn encode(self, b: &mut BytesMut) -> Result<()> {
         b.reserve(U16_BYTES);
-        BigEndian::write_u16(b, self.v);
+        b.put_u16::<BigEndian>(self.v);
         Ok(())
     }
 }
@@ -565,6 +690,20 @@ fn test_pdu_reader_u32() {
     assert_eq!(data.len(), 2);
 }
 
+#[test]
+fn test_pdu_reader_u32_2() {
+    let mut rdr =
+        pdu_pair_decoder::<U32W, BytesMutW>();
+
+    let mut data = BytesMut::with_capacity(256);
+    data.put_slice(&[0, 0, 0, 3, 65, 66]);
+    let r = rdr.decode(&mut data).ok();
+    assert_eq!(r, Some(None));
+
+    data.put(67 as u8);
+    let r = rdr.decode(&mut data).ok();
+    assert_eq!(r, Some(Some(BytesMutW::from_static(&[65, 66, 67]))));
+}
 
 #[test]
 fn test_pdu_reader_var_int() {

@@ -1,7 +1,5 @@
 //! Datatransfer protocol upper level
 
-use std::io::Error as IoError;
-use std::io::Result as IoResult;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -474,15 +472,16 @@ trait ConnectionPoolClient {
 
 
 
+
+
 #[test]
 fn test_read_block_simple() {
     use util::*;
     use util::test::*;
-    use std::net::{TcpListener, TcpStream};
-    use std::thread;
-    use std::io::{Read, Write};
-    extern crate env_logger;
-    env_logger::init();
+    use util::test::ptk::*;
+
+    //extern crate env_logger;
+    //env_logger::init();
 
 
 /*
@@ -496,45 +495,31 @@ fn test_read_block_simple() {
     println!("@@@@@ {:?}", CDebug(&m));
 */
 
-    fn expect(conn: &mut TcpStream, e: Vec<u8>) {
-        let mut v = vector_of_size(e.len());
-        let r = conn.read(&mut v);
-        assert_eq!(r.ok(), Some(e.len()));
-        assert_eq!(v, e);
-    }
-
-    let listener = TcpListener::bind("127.0.0.1:60010").unwrap();
-
-    let t = thread::spawn(move ||{
-        let mut conn = listener.incoming().next().unwrap().unwrap();
-
+    let t = spawn_test_server("127.0.0.1:60010", test_script!{
         //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05
-        expect(&mut conn, "\
+        expect "\
         00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:\
         2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:\
-        20:05:12:03:61:62:63:10:00:18:05".to_bytes()
-        );
+        20:05:12:03:61:62:63:10:00:18:05",
 
         //S 0d:08:00:22:09:0a:05:08:02:10:80:04:10:00
-        conn.write(&"0d:08:00:22:09:0a:05:08:02:10:80:04:10:00".to_bytes());
+        send "0d:08:00:22:09:0a:05:08:02:10:80:04:10:00",
 
         //S 00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:00:00:a9:c7:c0:1b
-        conn.write(&"\
+        send "\
         00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:\
-        00:00:a9:c7:c0:1b".to_bytes());
+        00:00:a9:c7:c0:1b",
 
         //S 41:42:43:44:0a
-        conn.write(&"41:42:43:44:0a".to_bytes());
+        send "41:42:43:44:0a",
 
         //S 00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:00:00
-        conn.write(&"\
+        send "\
         00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:\
-        00:00".to_bytes());
+        00:00",
 
         //E 02:08:06
-        expect(&mut conn, "\
-        02 08 06
-        ".to_bytes());
+        expect "02 08 06"
     });
 
     use std::net::ToSocketAddrs;

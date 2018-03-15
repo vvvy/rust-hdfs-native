@@ -2,19 +2,15 @@
 
 
 use std::borrow::Cow;
-use std::io::Error as IoError;
-use std::io::Result as IoResult;
 use tokio_io::codec::{Decoder, Encoder};
 use bytes::{BytesMut, BufMut};
 use byteorder::BigEndian;
 
 
-use ::*;
+use *;
 use super::packet::{BlockDataPacket, PacketDecoder};
 use protobuf_api::*;
 use codec_tools::*;
-use result::ErrorConverter;
-
 
 const DATA_TRANSFER_VERSION: u16 = 28;
 
@@ -126,6 +122,18 @@ pub enum DtRsp {
     ReadBlock(OpBlockReadMessage)
 }
 
+impl DtRsp {
+    fn terminates_exchange(&self) -> bool {
+        match self {
+            &DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, _)) => !has_data,
+            &DtRsp::ReadBlock(OpBlockReadMessage::Packet(_)) => false,
+            //We assume majority are one req-one resp
+            _ => true
+
+        }
+    }
+}
+
 pub enum DtCodec {
     Null,
     OpBlockRead(OpBlockReadCodec)
@@ -175,20 +183,23 @@ impl Decoder for DtCodec {
     /// Chunks are Data transfer packets
 
     fn decode(&mut self, src: &mut BytesMut) -> IoResult<Option<Self::Item>> {
-        //TODO: switch state to Null once finished with decoding
-        match self {
+        let rv = match self {
             &mut DtCodec::OpBlockRead(ref mut obrc) =>
                 obrc.decode(src).map(|w| w.map(|v|
                     DtRsp::ReadBlock(v)
                 )),
             &mut DtCodec::Null =>
                 Err(app_error!(codec "DtCodec: invalid protocol state").into())
+        };
+        //switch state to Null once finished with decoding
+        if let &Ok(Some(ref rsp)) = &rv {
+            if rsp.terminates_exchange() {
+                *self = DtCodec::Null;
+            }
         }
+        rv
     }
-
 }
-
-
 
 
 
