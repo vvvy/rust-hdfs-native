@@ -20,12 +20,15 @@ mod result;
 mod codec_tools;
 mod dt;
 mod nn;
+mod cpool;
 
 pub mod hdfs;
 pub mod config;
 
 pub use error::*;
 pub use result::*;
+pub use cpool::*;
+pub use protobuf_api::*;
 
 pub use std::io::Error as IoError;
 pub use std::io::Result as IoResult;

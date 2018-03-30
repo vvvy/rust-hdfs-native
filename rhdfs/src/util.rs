@@ -1,6 +1,15 @@
 use std::fmt::{Debug, Display};
 
 
+/*
+trait ConnectionPoolClient {
+    fn borrow(addr: &SocketAddr) -> Box<Future<Item=Connection, Error=IoError>>;
+    fn reclaim(c: Connection);
+}
+*/
+
+
+
 /// Vector of `n` default values
 #[inline]
 pub fn vector_of_size<T: Default + Clone>(n: usize) -> Vec<T> {

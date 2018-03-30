@@ -462,11 +462,6 @@ pub fn read_block<'a, W: Write + Debug + 'static>(c: Connection, r: ReadBlockReq
     ))
 }
 
-trait ConnectionPoolClient {
-    fn borrow(addr: &SocketAddr) -> Box<Future<Item=Connection, Error=IoError>>;
-    fn reclaim(c: Connection);
-}
-
 
 
 

@@ -80,7 +80,8 @@ pub use protocolpb::proto::hdfs::hdfs::{
     ChecksumTypeProto,
     DirectoryListingProto,
     HdfsFileStatusProto,
-    HdfsFileStatusProto_FileType
+    HdfsFileStatusProto_FileType,
+    FsPermissionProto
 };
 
 pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
@@ -110,6 +111,7 @@ pub use protocolpb::proto::hadoop::ProtobufRpcEngine::{
 
 /// Protobuf API abstraction layer.
 /// Each PDU type field used must be declared here
+#[macro_export]
 macro_rules! pbdb {
 //Namenode (client)
 { GetListingRequestProto, src, $a:tt } => { pbdbf!{ get_src, set_src, $a } };
@@ -137,6 +139,8 @@ macro_rules! pbdb {
 { HdfsFileStatusProto, children_num, $a:tt }=> { pbdbf!{ get_childrenNum, set_childrenNum, $a } };
 { HdfsFileStatusProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, $a } };
 { HdfsFileStatusProto, storage_policy, $a:tt }=> { pbdbf!{ get_storagePolicy, set_storagePolicy, $a } };
+
+{ FsPermissionProto, perm, $a:tt }=> { pbdbf!{ get_perm, set_perm, $a } };
 
 //RPC
 { RpcRequestHeaderProto, rpc_kind, $a:tt } => { pbdbf!{ get_rpcKind, set_rpcKind, $a } };
@@ -195,6 +199,7 @@ macro_rules! pbdb {
 
 }
 
+#[macro_export]
 macro_rules! pbdbf {
     { $get:ident, $set:ident, { $r:expr } } => { $r.$get() };
     { $get:ident, $set:ident, { $r:expr, $v:expr } } => { $r.$set($v) };

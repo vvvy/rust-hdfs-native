@@ -12,6 +12,21 @@ use *;
 use protobuf_api::*;
 use super::codec::{NnCodec, NnQ, NnR, RpcReq, RpcRsp, HandshakeContext, OpContext};
 
+pub enum ProtocolFsmResult {
+    Send(NnQ),
+    Success,
+    Err(IoError)
+}
+
+pub trait ProtocolFsm {
+    fn start(self) -> (ProtocolFsmResult, Self);
+    fn incoming(self, NnR) -> (ProtocolFsmResult, Self);
+}
+
+
+
+
+
 pub struct Connection {
     io: Framed<TcpStream, NnCodec>,
     client_id: Vec<u8>,
@@ -143,6 +158,25 @@ impl Connection {
         let method_name = get_method_name(&q);
         Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
     }
+
+    pub fn run<P>(self, p: P) -> Box<Future<Item=(Connection, P), Error=IoError>>
+        where P: ProtocolFsm + 'static
+    {
+        self.fsm_result(p.start())
+    }
+
+    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> Box<Future<Item=(Connection, P), Error=IoError>>
+        where P: ProtocolFsm + 'static
+    {
+        match r {
+            ProtocolFsmResult::Send(q) =>
+                Box::new(self.call(q).and_then(|(r, c)| c.fsm_result(p.incoming(r)))),
+            ProtocolFsmResult::Success =>
+                Box::new(ok((self, p))),
+            ProtocolFsmResult::Err(e) =>
+                Box::new(err(e))
+        }
+    }
 }
 
 
@@ -195,10 +229,11 @@ fn test_read_listing() {
 
     let src = "/".to_owned();
 
-    let mut q = GetListingRequestProto::new();
-    q.set_src(src);
-    q.set_startAfter(vec![]);
-    q.set_needLocation(false);
+    let mut q = pb_cons!(GetListingRequestProto,
+        src: src,
+        start_after: vec![],
+        need_location: false
+        );
 
     //let (_, r) = c.call::<_, GetListingResponseProto>(st, "getListing".to_owned(), q).unwrap();
     let f =
@@ -211,14 +246,25 @@ fn test_read_listing() {
         _ => panic!("invalid reesp")
     };
 
-    for fs in r.get_dirList().get_partialListing() {
-        let sz = match fs.get_fileType() {
-            HdfsFileStatusProto_FileType::IS_DIR => format!("<dir, {} entries>", fs.get_childrenNum()),
-            HdfsFileStatusProto_FileType::IS_SYMLINK => format!("->{}", String::from_utf8_lossy(fs.get_symlink())),
-            _ => format!("{}", fs.get_length())
-        };
-        println!("{}\t{}", String::from_utf8_lossy(fs.get_path()), sz);
-    }
+    /*for fs in pb_decons!(DirectoryListingProto,
+            pb_decons!(GetListingResponseProto, r, dir_list),
+            partial_listing)
+        {
+            let sz = match fs.get_fileType() {
+                HdfsFileStatusProto_FileType::IS_DIR => format!("<dir, {} entries>", fs.get_childrenNum()),
+                HdfsFileStatusProto_FileType::IS_SYMLINK => format!("->{}", String::from_utf8_lossy(fs.get_symlink())),
+                _ => format!("{}", fs.get_length())
+            };
+            println!("{}\t{}", String::from_utf8_lossy(fs.get_path()), sz);
+        }*/
+    let x: &[HdfsFileStatusProto] = pb_decons!(DirectoryListingProto,
+            pb_decons!(GetListingResponseProto, r, dir_list),
+            partial_listing);
+
+    let y: Vec<Cow<str>> = x.iter().map(|fs| String::from_utf8_lossy(fs.get_path())).collect();
+    let z: Vec<Cow<str>> =(["benchmarks", "hbase", "solr", "tmp", "user", "var"]).iter().map(|x|Cow::from(*x)).collect();
+    assert_eq!(y, z);
+
     trace!("RESULT: {:?}", r);
 
     //-----------------------------------

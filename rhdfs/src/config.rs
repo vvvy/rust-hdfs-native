@@ -16,6 +16,8 @@ impl Default for Common {
 
 pub struct GetListing {
     pub src: Vec<String>,
+    pub need_location: bool,
+
     //[-C] [-d] [-h] [-q] [-R] [-t] [-S] [-r] [-u]
     pub c_u: bool,
     pub d: bool,
@@ -31,7 +33,9 @@ pub struct GetListing {
 impl Default for GetListing {
     fn default() -> Self {
         GetListing {
-            src: vec![], c_u: false, d: false, h: false, q: false, r_u: false,
+            src: vec![],
+            need_location: false,
+            c_u: false, d: false, h: false, q: false, r_u: false,
             t: false, s_u: false, r: false, u: false
         }
     }
