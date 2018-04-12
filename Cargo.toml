@@ -1,2 +1,2 @@
 [workspace]
-members=["protocolpb","rhdfs"]
+members=["protocolpb","rhdfs","rhdfs-cmd"]

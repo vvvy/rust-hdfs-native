@@ -1,0 +1,14 @@
+[package]
+name = "rhdfs-cmd"
+version = "0.1.0"
+authors = ["Valery Vybornov <vvybornov@gmail.com>"]
+
+[dependencies]
+rhdfs = { path = "../rhdfs" }
+log = "0.4"
+env_logger = "0.5"
+chrono = "0.4"
+
+[[bin]]
+name = "rhdfs"
+path = "src/main.rs"
