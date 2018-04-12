@@ -2,6 +2,8 @@
 
 #[macro_use] extern crate log;
 extern crate env_logger;
+extern crate chrono;
+
 
 #[macro_use] extern crate rhdfs;
 
@@ -27,11 +29,13 @@ fn main() {
 
 fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
 
-    let mut cp = ConnectionPoolST::new(&cfg)?;
+    let mut cp = SyncConnectionPoolST::new(&cfg)?;
 
     match cmd {
-        Command::GetListing(gl, xargs) =>
-            get_listing(&mut cp, gl, &cfg),
+        Command::GetListing(args) =>
+            get_listing(&mut cp, args),
+        Command::Get(args) =>
+            get(&mut cp, args),
         Command::Version =>
             version(),
         Command::Help|Command::Null =>
@@ -55,18 +59,24 @@ fn test_perms_s() {
 
 }
 
-fn get_listing(cp: &mut ConnectionPoolST, args: config::GetListing, cfg: &config::Common) -> Result<()> {
+fn get_listing(cp: &mut SyncConnectionPoolST, args: args::GetListing) -> Result<()> {
     struct PSink {
         src: Vec<String>
     }
     impl hdfs::ListingSink for PSink {
-        fn files(&mut self, fs: &[HdfsFileStatusProto], src_pos: usize, last_in_src: bool, last: bool) {
+        fn files(&mut self, fs: &[HdfsFileStatusProto], src_pos: usize, _last_in_src: bool, _last: bool) {
+            use self::chrono::prelude::*;
+
             for f in fs {
                 let (
                     file_type, path, length, permission, owner, group, modification_time
                 ) = pb_decons!(HdfsFileStatusProto, f,
                     file_type, path, length, permission, owner, group, modification_time
                 );
+
+                let mtime_dt: DateTime<Local> = Local.timestamp(modification_time as i64/ 1000 , 0);
+                let mtime = mtime_dt.format("%Y-%m-%d %H:%M").to_string();
+
                 let perm_s = perms_s(pb_decons!(FsPermissionProto, permission, perm));
 
                 let path = String::from_utf8_lossy(path);
@@ -76,25 +86,33 @@ fn get_listing(cp: &mut ConnectionPoolST, args: config::GetListing, cfg: &config
                 match file_type {
                     HdfsFileStatusProto_FileType::IS_DIR => println!(
                         "d{} {} {} {} {} {} {}{}{}",
-                        perm_s, '-', owner, group, length, modification_time, src, sep, path
+                        perm_s, '-', owner, group, length, mtime, src, sep, path
                     ),
                     HdfsFileStatusProto_FileType::IS_SYMLINK => println!(
                         "u{} {} {} {} {} {} {}{}{} ->{}",
-                        perm_s, '?', owner, group, length, modification_time, src, sep, path,
+                        perm_s, '?', owner, group, length, mtime, src, sep, path,
                         String::from_utf8_lossy(pb_decons!(HdfsFileStatusProto, f, symlink))
                     ),
                     HdfsFileStatusProto_FileType::IS_FILE => println!(
                         "-{} {} {} {} {} {} {}{}{}",
-                        perm_s, '?', owner, group, length, modification_time, src, sep, path
+                        perm_s, '?', owner, group, length, mtime, src, sep, path
                     )
                 };
             }
         }
     }
 
-    let p = hdfs::GetListingState::new(Box::new(PSink { src: args.src.clone() }), args);
+    let src2 = args.src.clone();
+    let _ = hdfs::get_listing(
+        cp,
+        config::GetListing { src: args.src, need_location: false },
+        Box::new(PSink { src: src2 })
+    )?;
+    Ok(())
+}
 
-    let _ = cp.run_nn(p)?;
+fn get(cp: &mut SyncConnectionPoolST, args: args::Get) -> Result<()> {
+    let _ = hdfs::get(cp, config::Get { src: args.fs, tgt_dir: None } )?;
     Ok(())
 }
 
@@ -117,8 +135,9 @@ rhdfs version
     std::process::exit(1);
 }
 
-mod xargs {
+mod args {
     pub struct GetListing {
+        pub src: Vec<String>,
         //[-C] [-d] [-h] [-q] [-R] [-t] [-S] [-r] [-u]
         pub c_u: bool,
         pub d: bool,
@@ -134,8 +153,21 @@ mod xargs {
     impl Default for GetListing {
         fn default() -> Self {
             GetListing {
+                src: vec![],
                 c_u: false, d: false, h: false, q: false, r_u: false,
                 t: false, s_u: false, r: false, u: false
+            }
+        }
+    }
+
+    pub struct Get {
+        pub fs: Vec<String>
+    }
+
+    impl Default for Get {
+        fn default() -> Self {
+            Get {
+                fs: vec![]
             }
         }
     }
@@ -145,7 +177,8 @@ enum Command {
     Null,
     Help,
     Version,
-    GetListing(config::GetListing, xargs::GetListing)
+    GetListing(args::GetListing),
+    Get(args::Get)
 }
 
 fn parse_command_line() -> (Command, config::Common) {
@@ -157,7 +190,8 @@ fn parse_command_line() -> (Command, config::Common) {
             c @ &mut Command::Null => {
                 match s {
                     None => match a.as_ref() {
-                        "ls" => { *c = Command::GetListing(config::GetListing::default(), xargs::GetListing::default()); None },
+                        "ls" => { *c = Command::GetListing(args::GetListing::default()); None },
+                        "get" => { *c = Command::Get(args::Get::default()); None },
                         "help" => { *c = Command::Help; None },
                         "version" => { *c = Command::Version; None },
                         _ => Some(a)
@@ -172,20 +206,24 @@ fn parse_command_line() -> (Command, config::Common) {
                     }
                 }
             },
-            &mut Command::GetListing(ref mut gl, ref mut _xgl) => {
+            &mut Command::GetListing(ref mut args) => {
                 match a.as_ref() {
                     //[-C] [-d] [-h] [-q] [-R] [-t] [-S] [-r] [-u]
-                    "-C" => gl.c_u = true,
-                    "-d" => gl.d = true,
-                    "-h" => gl.h = true,
-                    "-q" => gl.q = true,
-                    "-R" => gl.r_u = true,
-                    "-t" => gl.t = true,
-                    "-S" => gl.s_u = true,
-                    "-r" => gl.r = true,
-                    "-u" => gl.u = true,
-                    _ => gl.src.push(a)
+                    "-C" => args.c_u = true,
+                    "-d" => args.d = true,
+                    "-h" => args.h = true,
+                    "-q" => args.q = true,
+                    "-R" => args.r_u = true,
+                    "-t" => args.t = true,
+                    "-S" => args.s_u = true,
+                    "-r" => args.r = true,
+                    "-u" => args.u = true,
+                    _ => args.src.push(a)
                 };
+                None
+            },
+            &mut Command::Get(ref mut args) => {
+                args.fs.push(a);
                 None
             },
             &mut Command::Help | &mut Command::Version => None
@@ -246,7 +284,7 @@ fn parse_cmdln<F>(f: F) where F: FnMut(Option<String>, String) -> Option<String>
     }
 }
 
-
+/*
 fn bool_opt(s: String) -> bool {
     match s.as_ref() {
         "true"|"+"|"yes" => true,
@@ -254,3 +292,4 @@ fn bool_opt(s: String) -> bool {
         v => panic!("invalid bool value '{}'", v)
     }
 }
+*/

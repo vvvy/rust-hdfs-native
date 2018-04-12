@@ -81,12 +81,16 @@ pub use protocolpb::proto::hdfs::hdfs::{
     DirectoryListingProto,
     HdfsFileStatusProto,
     HdfsFileStatusProto_FileType,
-    FsPermissionProto
+    FsPermissionProto,
+    LocatedBlocksProto,
+    LocatedBlockProto
 };
 
 pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
     GetListingRequestProto,
     GetListingResponseProto,
+    GetBlockLocationsRequestProto,
+    GetBlockLocationsResponseProto
 };
 
 pub use protocolpb::proto::hadoop::RpcHeader::{
@@ -113,13 +117,20 @@ pub use protocolpb::proto::hadoop::ProtobufRpcEngine::{
 /// Each PDU type field used must be declared here
 #[macro_export]
 macro_rules! pbdb {
-//Namenode (client)
+//ClientNamenodeProtocol.proto
 { GetListingRequestProto, src, $a:tt } => { pbdbf!{ get_src, set_src, $a } };
 { GetListingRequestProto, start_after, $a:tt } => { pbdbf!{ get_startAfter, set_startAfter, $a } };
 { GetListingRequestProto, need_location, $a:tt } => { pbdbf!{ get_needLocation, set_needLocation, $a } };
 
 { GetListingResponseProto, dir_list, $a:tt } => { pbdbf!{ get_dirList, set_dirList, $a } };
 
+{ GetBlockLocationsRequestProto, src, $a:tt }=> { pbdbf!{ get_src, set_src, $a } };
+{ GetBlockLocationsRequestProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
+{ GetBlockLocationsRequestProto, length, $a:tt }=> { pbdbf!{ get_length, set_length, $a } };
+
+{ GetBlockLocationsResponseProto, locations, $a:tt }=> { pbdbf!{ take_locations, set_locations, $a } };
+
+//hdfs.proto
 { DirectoryListingProto, partial_listing, $a:tt } => { pbdbf!{ get_partialListing, set_partialListing, $a } };
 { DirectoryListingProto, remaining_entries, $a:tt } => { pbdbf!{ get_remainingEntries, set_remainingEntries, $a } };
 
@@ -141,6 +152,17 @@ macro_rules! pbdb {
 { HdfsFileStatusProto, storage_policy, $a:tt }=> { pbdbf!{ get_storagePolicy, set_storagePolicy, $a } };
 
 { FsPermissionProto, perm, $a:tt }=> { pbdbf!{ get_perm, set_perm, $a } };
+
+{ LocatedBlocksProto, file_length, $a:tt }=> { pbdbf!{ get_fileLength, set_fileLength, $a } };
+{ LocatedBlocksProto, under_construction, $a:tt }=> { pbdbf!{ get_underConstruction, set_underConstruction, $a } };
+{ LocatedBlocksProto, last_block, $a:tt }=> { pbdbf!{ get_lastBlock, set_lastBlock, $a } };
+{ LocatedBlocksProto, is_last_block_complete, $a:tt }=> { pbdbf!{ get_isLastBlockComplete, set_isLastBlockComplete, $a } };
+{ LocatedBlocksProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, $a } };
+
+{ LocatedBlockProto, b, $a:tt }=> { pbdbf!{ get_b, set_b, $a } };
+{ LocatedBlockProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
+{ LocatedBlockProto, corrupt, $a:tt }=> { pbdbf!{ get_corrupt, set_corrupt, $a } };
+{ LocatedBlockProto, block_token, $a:tt }=> { pbdbf!{ get_blockToken, set_blockToken, $a } };
 
 //RPC
 { RpcRequestHeaderProto, rpc_kind, $a:tt } => { pbdbf!{ get_rpcKind, set_rpcKind, $a } };
@@ -220,13 +242,16 @@ macro_rules! pb_cons {
 
 #[macro_export]
 macro_rules! pb_decons {
+    { $t:ident, $r:expr, $f:ident } => {
+        pbdb!{$t, $f, {$r} }
+    };
     { $t:ident, $r:expr, $($f:ident),+ } => {
         (
             $(
                 pbdb!{$t, $f, {$r} }
             ),+
         )
-    }
+    };
 }
 
 #[test]

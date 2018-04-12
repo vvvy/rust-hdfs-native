@@ -577,6 +577,7 @@ fn test_var_int_u32_encoder() {
         { $v:expr, $a:expr } => {
             let mut w = BytesMut::with_capacity(5);
             let r = VarIntU32Encoder.encode($v, &mut w);
+            assert!(r.is_ok());
             assert_eq!(&w[..], $a);
         }
     }

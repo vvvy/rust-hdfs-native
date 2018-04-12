@@ -1,5 +1,4 @@
-use std::error::Error as StdError;
-//use std::result::Result as StdResult;
+
 use std::fmt::{Display, Formatter, Result};
 pub use std::borrow::Cow;
 use protobuf::ProtobufError;
@@ -8,8 +7,8 @@ use protocolpb::proto::hadoop::RpcHeader::{
     RpcResponseHeaderProto_RpcStatusProto as RpcStatusProto,
     RpcResponseHeaderProto_RpcErrorCodeProto as RpcErrorCodeProto
 };
-use std::io::Error as IoError;
 use std::io::ErrorKind;
+use *;
 
 #[derive(Debug)]
 pub enum Error {

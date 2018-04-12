@@ -1,5 +1,5 @@
 use ::Error;
-use std::result::Result as StdResult;
+use *;
 
 pub type Result<T> = StdResult<T, Error>;
 

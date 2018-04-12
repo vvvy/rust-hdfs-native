@@ -1,7 +1,7 @@
 
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use tokio_core::net::{TcpStream, TcpStreamNew};
+use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
 use tokio_io::codec::Framed;
 use tokio_io::AsyncRead;
@@ -18,9 +18,20 @@ pub enum ProtocolFsmResult {
     Err(IoError)
 }
 
+/// Protocol FSM event handler
 pub trait ProtocolFsm {
+    /// called upon start of operation
     fn start(self) -> (ProtocolFsmResult, Self);
+    /// called upon incoming message arrival
     fn incoming(self, NnR) -> (ProtocolFsmResult, Self);
+}
+
+/// Protocol FSM event handler (trait object version)
+pub trait ProtocolFsmO {
+    /// called upon start of operation
+    fn start(&self) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
+    /// called upon incoming message arrival
+    fn incoming(&self, NnR) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
 }
 
 
@@ -159,7 +170,7 @@ impl Connection {
         Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
     }
 
-    pub fn run<P>(self, p: P) -> Box<Future<Item=(Connection, P), Error=IoError>>
+    pub fn run<P>(self, p: P) -> BFI<(Connection, P)>
         where P: ProtocolFsm + 'static
     {
         self.fsm_result(p.start())
@@ -177,12 +188,30 @@ impl Connection {
                 Box::new(err(e))
         }
     }
+
+    pub fn run_o(self, p: Box<ProtocolFsmO>) -> Box<Future<Item=(Connection, Box<ProtocolFsmO>), Error=IoError>> {
+        self.fsm_result_o(p.start())
+    }
+
+    fn fsm_result_o(self, (r, p): (ProtocolFsmResult, Box<ProtocolFsmO>)) -> Box<Future<Item=(Connection, Box<ProtocolFsmO>), Error=IoError>> {
+        match r {
+            ProtocolFsmResult::Send(q) =>
+                Box::new(self.call(q).and_then(move |(r, c)| c.fsm_result_o(p.incoming(r)))),
+            ProtocolFsmResult::Success =>
+                Box::new(ok((self, p))),
+            ProtocolFsmResult::Err(e) =>
+                Box::new(err(e))
+        }
+    }
+
 }
+
 
 
 fn get_method_name(q: &NnQ) -> String {
     match q {
-        &NnQ::GetListing(..) => "getListing".to_owned()
+        &NnQ::GetListing(..) => "getListing".to_owned(),
+        &NnQ::GetBlockLocations(..) => "getBlockLocations".to_owned()
     }
 }
 

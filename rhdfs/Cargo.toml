@@ -15,6 +15,7 @@ bytes = "0.4"
 crc = "^1.0.0"
 uuid = { version = "0.6", features = ["v4"] }
 log = "0.4"
-env_logger = "0.5" #this is solely for bin/rhdfs executable
+env_logger = "0.5" #this is solely for rhdfs executable
+chrono = "0.4"  #this is solely for rhdfs executable
 
 protocolpb =  { path = "../protocolpb" }

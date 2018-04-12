@@ -5,12 +5,12 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::fmt;
 use std::fmt::Debug;
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::AsyncRead;
 use tokio_io::codec::Framed;
 use futures::{Future, Stream, Poll, Sink};
 use futures::future::{ok, err};
 
-use tokio_core::net::{TcpStream, TcpStreamNew};
+use tokio_core::net::TcpStream;
 use tokio_core::reactor::Handle;
 
 use byteorder::{ByteOrder, BigEndian};
@@ -19,7 +19,6 @@ use crc::crc32;
 use super::codec::{DtCodec, DtReq, DtRsp, OpBlockReadMessage};
 use super::packet::BlockDataPacket;
 use protobuf_api::*;
-use util::*;
 use *;
 
 
@@ -38,7 +37,7 @@ impl Stream for Connection {
 
 /// 'Action' part of the output of a protocol FSM event handler
 #[derive(Debug)]
-enum ProtocolFsmResult {
+pub enum ProtocolFsmResult {
     /// Send out the message
     Send(DtReq),
     /// Wait until a message arrives from the remote end
@@ -81,12 +80,22 @@ macro_rules! pfsm_trace {
 }
 
 /// Protocol FSM event handler
-trait ProtocolFsm : Debug {
+pub trait ProtocolFsm : Debug {
     /// Idle event occurs a) upon start or b) upon successful outgoing packet transmission
     fn idle(self) -> (ProtocolFsmResult, Self);
     /// The event is raised upon successful incoming packet reception
     fn incoming(self, rsp: DtRsp) -> (ProtocolFsmResult, Self);
 }
+
+
+/// Protocol FSM event handler (trait object version)
+pub trait ProtocolFsmO : Debug {
+    /// Idle event occurs a) upon start or b) upon successful outgoing packet transmission
+    fn idle(&self) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
+    /// The event is raised upon successful incoming packet reception
+    fn incoming(&self, rsp: DtRsp) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
+}
+
 
 
 impl Connection {
@@ -139,7 +148,7 @@ impl Connection {
     }
 
     #[inline]
-    fn run<P>(self, p: P) -> Box<Future<Item=(Connection, P), Error=IoError>>
+    pub fn run<P>(self, p: P) -> Box<Future<Item=(Connection, P), Error=IoError>>
         where P: ProtocolFsm + 'static {
         self.fsm_idle(p)
     }
@@ -182,6 +191,49 @@ impl Connection {
                     None => Box::new(err(Connection::broken_pipe_error()))
                 }
             );
+        Box::new(rv)
+    }
+
+    #[inline]
+    fn run_o(self, p: Box<ProtocolFsmO>) -> BFI<(Connection, Box<ProtocolFsmO>)> {
+        self.fsm_idle_o(p)
+    }
+
+    #[inline]
+    fn fsm_idle_o(self, p: Box<ProtocolFsmO>) -> BFI<(Connection, Box<ProtocolFsmO>)> {
+        self.fsm_result_o(pfsm_trace!(p, "<idle>", p.idle()))
+    }
+
+
+    #[inline]
+    fn fsm_incoming_o(self, p: Box<ProtocolFsmO>, rsp: DtRsp) -> BFI<(Connection, Box<ProtocolFsmO>)> {
+        self.fsm_result_o(pfsm_trace!(p, rsp, p.incoming(rsp)))
+    }
+
+    fn fsm_result_o(self, (r, p): (ProtocolFsmResult, Box<ProtocolFsmO>)) -> BFI<(Connection, Box<ProtocolFsmO>)> {
+        match r {
+            ProtocolFsmResult::Send(req) =>
+                Box::new(self.send_req(req).and_then(|c| c.fsm_idle_o(p))),
+            ProtocolFsmResult::Wait =>
+                self.fsm_wait_o(p),
+            ProtocolFsmResult::Success =>
+                Box::new(ok((self, p))),
+            ProtocolFsmResult::Err(e) =>
+                Box::new(err(e))
+        }
+    }
+
+    fn fsm_wait_o(self, p: Box<ProtocolFsmO>) -> BFI<(Connection, Box<ProtocolFsmO>)> {
+        let rv =
+            self
+                .into_future()
+                .map_err(|(e, _)| e)
+                .and_then(|(orsp, c)|
+                    match orsp {
+                        Some(r) => c.fsm_incoming_o(p, r),
+                        None => Box::new(err(Connection::broken_pipe_error()))
+                    }
+                );
         Box::new(rv)
     }
 }
@@ -401,7 +453,7 @@ impl<W> ProtocolFsm for OpReadBlockFsm<W> where W: Write + Debug {
 fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, w: W) -> BlockReadTracker<W> {
     let roci =
         pb_decons!(BlockOpResponseProto, borp, read_op_checksum_info);
-    let (checksum, chunk_offset) =
+    let (checksum, _chunk_offset) =
         pb_decons!(ReadOpChecksumInfoProto, roci, checksum, chunk_offset);
     let (ctype, bpc) =
         pb_decons!(ChecksumProto, checksum, type, bytes_per_checksum);
@@ -449,7 +501,7 @@ pub fn read_block<'a, W: Write + Debug + 'static>(c: Connection, r: ReadBlockReq
         match p {
             OpReadBlockFsm::Success(None, None, w) =>
                 (Ok(w), c),
-            OpReadBlockFsm::Success(r, l, w) =>
+            OpReadBlockFsm::Success(r, l, _w) =>
                 (Err(r.unwrap_or_else(|| l.unwrap_or_else(|| app_error!(unreachable)))), c),
             OpReadBlockFsm::Error(borp, _) => {
                 let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
@@ -471,8 +523,6 @@ pub fn read_block<'a, W: Write + Debug + 'static>(c: Connection, r: ReadBlockReq
 
 #[test]
 fn test_read_block_simple() {
-    use util::*;
-    use util::test::*;
     use util::test::ptk::*;
 
     //extern crate env_logger;
@@ -520,7 +570,7 @@ fn test_read_block_simple() {
     use std::net::ToSocketAddrs;
     use tokio_core::reactor::Core;
     use std::borrow::Cow;
-    use futures::{Future, Stream};
+    use futures::Future;
 
     let mut core = Core::new().unwrap();
     let addr = "127.0.0.1:60010".to_socket_addrs().unwrap().next().ok_or(app_error!(other "DN host not found")).unwrap();

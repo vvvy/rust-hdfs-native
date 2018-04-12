@@ -48,7 +48,7 @@ fn encode_generic_op<PDU: PduSer>(op: Op, pdu: PDU, dst: &mut BytesMut) -> Resul
 
 
 #[derive(Debug)]
-enum OpBlockReadCodec {
+pub enum OpBlockReadCodec {
     Head(PduDecoder<VarIntU32Decoder, BlockOpResponseProto>),
     Chunk(PacketDecoder),
     End

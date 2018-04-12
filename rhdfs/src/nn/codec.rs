@@ -3,7 +3,6 @@
 use std::fmt::Debug;
 use tokio_io::codec::{Decoder, Encoder};
 use bytes::{BytesMut, BufMut};
-use byteorder::BigEndian;
 use codec_tools::*;
 use util::*;
 use protobuf_api::*;
@@ -255,31 +254,36 @@ impl<MR, R> Decoder for RpcDecoder<MR, R> where MR: PduDes + Debug, R: Debug {
 
 #[derive(Debug)]
 pub enum NnQ {
-    GetListing(GetListingRequestProto)
+    GetListing(GetListingRequestProto),
+    GetBlockLocations(GetBlockLocationsRequestProto)
 }
 
 impl PduSer for NnQ {
     fn serialized_len(&mut self) -> usize {
         match self {
-            &mut NnQ::GetListing(ref mut glrp) => glrp.serialized_len()
+            &mut NnQ::GetListing(ref mut m) => m.serialized_len(),
+            &mut NnQ::GetBlockLocations(ref mut m) => m.serialized_len()
         }
     }
 
     fn encode(self, b: &mut BytesMut) -> Result<()> {
         match self {
-            NnQ::GetListing(glrp) => glrp.encode(b)
+            NnQ::GetListing(m) => m.encode(b),
+            NnQ::GetBlockLocations(m) => m.encode(b)
         }
     }
 }
 
 #[derive(Debug)]
 pub enum NnR {
-    GetListing(GetListingResponseProto)
+    GetListing(GetListingResponseProto),
+    GetBlockLocations(GetBlockLocationsResponseProto)
 }
 
 #[derive(Debug)]
 pub enum NnS {
-    GetListing(RpcDecoder<GetListingResponseProto, NnR>)
+    GetListing(RpcDecoder<GetListingResponseProto, NnR>),
+    GetBlockLocations(RpcDecoder<GetBlockLocationsResponseProto, NnR>)
 }
 
 impl Decoder for NnS {
@@ -288,7 +292,8 @@ impl Decoder for NnS {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         match self {
-            &mut NnS::GetListing(ref mut p) => p.decode(src)
+            &mut NnS::GetListing(ref mut p) => p.decode(src),
+            &mut NnS::GetBlockLocations(ref mut p) => p.decode(src)
         }
     }
 }
@@ -303,7 +308,8 @@ impl RpcCodecA for NnCodecA {
 
     fn state<'a>(req: &NnQ) -> NnS {
         match req {
-            &NnQ::GetListing(..) => NnS::GetListing(RpcDecoder::new(|o| NnR::GetListing(o)))
+            &NnQ::GetListing(..) => NnS::GetListing(RpcDecoder::new(|o| NnR::GetListing(o))),
+            &NnQ::GetBlockLocations(..) => NnS::GetBlockLocations(RpcDecoder::new(|o| NnR::GetBlockLocations(o)))
         }
     }
 }
