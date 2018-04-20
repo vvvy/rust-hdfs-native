@@ -3,5 +3,5 @@
 mod codec;
 mod proto;
 
-pub use self::proto::{Connection, ProtocolFsmResult, ProtocolFsm, ProtocolFsmO};
+pub use self::proto::{Connection, ProtocolFsmResult, ProtocolFsm, CallW};
 pub use self::codec::{RpcReq, NnQ, NnR};

@@ -1,8 +1,8 @@
 
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Handle;
+use tokio_tcp::TcpStream;
+//use tokio_core::reactor::Handle;
 use tokio_io::codec::Framed;
 use tokio_io::AsyncRead;
 use futures::{Future, Stream, Poll, Sink};
@@ -26,6 +26,7 @@ pub trait ProtocolFsm {
     fn incoming(self, NnR) -> (ProtocolFsmResult, Self);
 }
 
+/*
 /// Protocol FSM event handler (trait object version)
 pub trait ProtocolFsmO {
     /// called upon start of operation
@@ -33,7 +34,7 @@ pub trait ProtocolFsmO {
     /// called upon incoming message arrival
     fn incoming(&self, NnR) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
 }
-
+*/
 
 
 
@@ -106,16 +107,16 @@ fn validate_response(response_header: &RpcResponseHeaderProto,
 }
 
 impl Connection {
-    pub fn connect_det(handle: &Handle, addr: &SocketAddr, client_id: Vec<u8>, eff_user: String) -> Box<Future<Item=Connection, Error=IoError>> {
+    pub fn connect_det(addr: &SocketAddr, client_id: Vec<u8>, eff_user: String) -> BFI<Connection> {
         let rv =
-            TcpStream::connect(addr, handle)
+            TcpStream::connect(addr)
                 .map(|c| Connection { io: c.framed(NnCodec::new()), client_id, call_id: 0 })
                 .and_then(|c| c.send_handshake(eff_user));
         Box::new(rv)
     }
 
-    pub fn connect(handle: &Handle,addr: &SocketAddr, eff_user: String) -> Box<Future<Item=Connection, Error=IoError>> {
-        Connection::connect_det(handle,addr,  get_client_id(), eff_user)
+    pub fn connect(addr: &SocketAddr, eff_user: String) -> BFI<Connection> {
+        Connection::connect_det(addr, get_client_id(), eff_user)
     }
 
     #[inline]
@@ -123,14 +124,14 @@ impl Connection {
         IoError::new(ErrorKind::BrokenPipe, app_error!(other "broken pipe"))
     }
 
-    fn send_handshake(self, eff_user: String) -> Box<Future<Item=Connection, Error=IoError>> {
+    fn send_handshake(self, eff_user: String) -> BFI<Connection> {
         let Connection { io, client_id, call_id } = self;
         Box::new(
             io.send(RpcReq::Handshake(HandshakeContext::new(client_id.clone(), eff_user)))
                 .map(move |c| Connection { io: c, client_id, call_id }))
     }
 
-    fn send_req(self, q: NnQ, method_name: String) -> Box<Future<Item=Connection, Error=IoError>> {
+    fn send_req(self, q: NnQ, method_name: String) -> BFI<Connection> {
         let Connection { io, client_id, call_id } = self;
         Box::new(
             io.send(
@@ -148,7 +149,7 @@ impl Connection {
         )
     }
 
-    fn get_resp(self) -> Box<Future<Item=(NnR, Connection), Error=IoError>> {
+    fn get_resp(self) -> BFI<(NnR, Connection)> {
         let rv =
             self.into_future().and_then(|(orsp, c)|
                 match orsp {
@@ -165,19 +166,19 @@ impl Connection {
     }
 
     #[inline]
-    pub fn call(self, q: NnQ) -> Box<Future<Item=(NnR, Connection), Error=IoError>> {
+    pub fn call(self, q: NnQ) -> BFI<(NnR, Connection)> {
         let method_name = get_method_name(&q);
         Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
     }
 
     pub fn run<P>(self, p: P) -> BFI<(Connection, P)>
-        where P: ProtocolFsm + 'static
+        where P: ProtocolFsm + Send + 'static
     {
         self.fsm_result(p.start())
     }
 
-    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> Box<Future<Item=(Connection, P), Error=IoError>>
-        where P: ProtocolFsm + 'static
+    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> BFI<(Connection, P)>
+        where P: ProtocolFsm + Send + 'static
     {
         match r {
             ProtocolFsmResult::Send(q) =>
@@ -188,24 +189,35 @@ impl Connection {
                 Box::new(err(e))
         }
     }
+}
 
-    pub fn run_o(self, p: Box<ProtocolFsmO>) -> Box<Future<Item=(Connection, Box<ProtocolFsmO>), Error=IoError>> {
-        self.fsm_result_o(p.start())
-    }
+/// Wraps `call` operation into `ProtocolFsm`
+#[derive(Debug)]
+pub enum CallW {
+    Q(NnQ),
+    R(NnR),
+    Null
+}
 
-    fn fsm_result_o(self, (r, p): (ProtocolFsmResult, Box<ProtocolFsmO>)) -> Box<Future<Item=(Connection, Box<ProtocolFsmO>), Error=IoError>> {
-        match r {
-            ProtocolFsmResult::Send(q) =>
-                Box::new(self.call(q).and_then(move |(r, c)| c.fsm_result_o(p.incoming(r)))),
-            ProtocolFsmResult::Success =>
-                Box::new(ok((self, p))),
-            ProtocolFsmResult::Err(e) =>
-                Box::new(err(e))
+impl CallW {
+    pub fn new(q: NnQ) -> CallW { CallW::Q(q) }
+}
+
+impl ProtocolFsm for CallW {
+    fn start(self) -> (ProtocolFsmResult, Self) {
+        match self {
+            CallW::Q(q) => (ProtocolFsmResult::Send(q), CallW::Null),
+            x => (ProtocolFsmResult::Err(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x).into()), CallW::Null)
         }
     }
 
+    fn incoming(self, r: NnR) -> (ProtocolFsmResult, Self) {
+        match self {
+            CallW::Null => (ProtocolFsmResult::Success, CallW::R(r)),
+            x => (ProtocolFsmResult::Err(app_error!(other "invalid CallWrapper state: expected Null, got `{:?}`", x).into()), CallW::Null)
+        }
+    }
 }
-
 
 
 fn get_method_name(q: &NnQ) -> String {
@@ -244,13 +256,10 @@ fn test_read_listing() {
     });
 
     use std::net::ToSocketAddrs;
-    use tokio_core::reactor::Core;
 
-    let mut core = Core::new().unwrap();
     let addr = "127.0.0.1:58020".to_socket_addrs().unwrap().next().unwrap();
 
     let c = Connection::connect_det(
-        &core.handle(),
         &addr,
         vec![1, 2, 3, 4, 4, 3, 2, 1],
         "cloudera".to_owned()
@@ -258,7 +267,7 @@ fn test_read_listing() {
 
     let src = "/".to_owned();
 
-    let mut q = pb_cons!(GetListingRequestProto,
+    let q = pb_cons!(GetListingRequestProto,
         src: src,
         start_after: vec![],
         need_location: false
@@ -268,7 +277,7 @@ fn test_read_listing() {
     let f =
         c.and_then(|conn| conn.call(NnQ::GetListing(q)));
 
-    let (nr, _) = core.run(f).unwrap();
+    let (nr, _) = f.wait().unwrap();
 
     let r = match nr {
         NnR::GetListing(glr) => glr,

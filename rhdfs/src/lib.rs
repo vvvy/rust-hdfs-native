@@ -3,8 +3,8 @@
 #[macro_use] extern crate log;
 
 extern crate futures;
-extern crate tokio_core;
 extern crate tokio_io;
+extern crate tokio_tcp;
 extern crate protobuf;
 extern crate byteorder;
 extern crate bytes;
@@ -30,6 +30,7 @@ pub use types::*;
 pub use error::*;
 pub use result::*;
 pub use cpool::*;
+pub use reactor::*;
 pub use protobuf_api::*;
 
 

@@ -1,41 +1,31 @@
 
+use std::fs::File;
+use futures::Future;
+
 use protobuf_api::*;
-use cpool::*;
 use reactor::*;
 use nn::{NnR, NnQ};
 use *;
 
 
-
-pub type HdfsReactorContext = ReactorContext<
-    ConnectionPoolClient<CKey, CAddr, nn::Connection>,
-    ConnectionPoolClient<CKey, CAddr, dt::Connection>,
->;
-
-//impl HdfsReactorContext {
-//    fn new()
-//}
-
-
-
-pub trait ListingSink {
+pub trait ListingSink : Send {
     fn files(&mut self, fs: &[HdfsFileStatusProto], src_pos: usize, last_in_src: bool, last: bool);
 }
 
-struct GetListingState {
+struct GetListingState<LS> {
     src: std::collections::LinkedList<String>,
     pos: usize,
-    sk: Box<ListingSink>,
+    ls: LS,
     need_location: bool
 }
 
-impl GetListingState {
-    fn new(sk: Box<ListingSink>, args: config::GetListing) -> GetListingState {
-        GetListingState { src: args.src.into_iter().collect(), pos: 0, sk, need_location: args.need_location }
+impl<LS> GetListingState<LS> {
+    fn new(ls: LS, args: config::GetListing) -> GetListingState<LS> {
+        GetListingState { src: args.src.into_iter().collect(), pos: 0, ls, need_location: args.need_location }
     }
 }
 
-impl nn::ProtocolFsm for GetListingState {
+impl<LS> nn::ProtocolFsm for GetListingState<LS> where LS: ListingSink {
 
     fn start(self) -> (nn::ProtocolFsmResult, Self) {
         let next = if self.src.is_empty() {
@@ -74,7 +64,7 @@ impl nn::ProtocolFsm for GetListingState {
             self.pos += 1;
         }
         let last = self.src.is_empty();
-        self.sk.files(fs, pos, last_in_src, last);
+        self.ls.files(fs, pos, last_in_src, last);
 
         let next = if last {
             nn::ProtocolFsmResult::Success
@@ -99,35 +89,48 @@ impl nn::ProtocolFsm for GetListingState {
     }
 }
 
-pub fn get_listing(cp: &mut SyncConnectionPoolST, args: config::GetListing, sk: Box<ListingSink>) -> Result<Box<ListingSink>> {
-    let p = GetListingState::new(sk, args);
-    let r = cp.run_nn(p)?;
-    Ok(r.sk)
+pub fn get_listing<LS: ListingSink + 'static>(rc: &ReactorClient, args: config::GetListing, ls: LS) -> BFI<LS> {
+    Box::new(rc.run_nn(GetListingState::new(ls, args)).map(|gls| gls.ls))
 }
 
-
-pub fn get_block_locations(cp: &mut SyncConnectionPoolST, src: String) -> Result<LocatedBlocksProto> {
+pub fn get_block_locations(rc: &ReactorClient, src: String) -> BFI<LocatedBlocksProto> {
     let q = pb_cons!{GetBlockLocationsRequestProto,
         src: src,
         offset: 0,
         length: std::i64::MAX as u64
     };
-    let r = cp.call_nn(nn::NnQ::GetBlockLocations(q))?;
-    if let NnR::GetBlockLocations(mut gbl) = r {
-        let locs = pb_decons!(GetBlockLocationsResponseProto, gbl, locations);
-        Ok(locs)
-    } else {
-        Err(app_error!(other "Unexpected response type")/*.into()*/)
+    Box::new(rc.call_nn(nn::NnQ::GetBlockLocations(q)).and_then(move |r|
+        if let NnR::GetBlockLocations(mut gbl) = r {
+            let locs = pb_decons!(GetBlockLocationsResponseProto, gbl, locations);
+            Ok(locs)
+        } else {
+            Err(app_error!(other "Unexpected response type").into())
+        }
+    ))
+}
+
+
+pub struct Get {
+
+}
+
+impl ReactorProtocolFsm for Get {
+    type FN = nn::CallW;
+    type FD = ();
+
+    fn start(self) -> (Vec<ReactorOperation<<Self as ReactorProtocolFsm>::FN, <Self as ReactorProtocolFsm>::FD>>, Self) {
+        unimplemented!()
+    }
+
+    fn complete(self, ops: ReactorOperation<<Self as ReactorProtocolFsm>::FN, <Self as ReactorProtocolFsm>::FD>) -> (Vec<ReactorOperation<<Self as ReactorProtocolFsm>::FN, <Self as ReactorProtocolFsm>::FD>>, Self) {
+        unimplemented!()
     }
 }
 
 
-pub fn get(cp: &mut SyncConnectionPoolST, args: config::Get) -> Result<()> {
-    for f in args.src {
-        let r = hdfs::get_block_locations(cp, f)?;
-        println!("!!!! {:?}", r);
-    }
-    Ok(())
+pub fn get(rc: &ReactorClient, src: String, dst: File) -> BFI<()> {
+    let bl = hdfs::get_block_locations(rc, src);
+    Box::new(bl.map(|l| println!("LOC: {:?}", l)))
 }
 
 

@@ -2,9 +2,11 @@
 
 mod packet;
 mod codec;
+#[macro_use]
 mod proto;
+mod block_reader;
 
-pub use self::proto::{Connection, ProtocolFsm, ProtocolFsmO};
+pub use self::proto::{Connection, ProtocolFsm, ProtocolFsmResult};
 pub use self::codec::{DtReq, DtRsp};
-pub use self::proto::read_block;
+pub use self::block_reader::*;
 

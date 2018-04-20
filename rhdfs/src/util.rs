@@ -1,14 +1,6 @@
+#![allow(dead_code)]
+
 use std::fmt::{Debug, Display};
-
-
-/*
-trait ConnectionPoolClient {
-    fn borrow(addr: &SocketAddr) -> Box<Future<Item=Connection, Error=IoError>>;
-    fn reclaim(c: Connection);
-}
-*/
-
-
 
 /// Vector of `n` default values
 #[inline]

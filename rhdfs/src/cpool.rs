@@ -4,23 +4,23 @@ use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::time::{Instant, Duration};
 use std::marker::PhantomData;
+use std::fmt::Debug;
 
-use tokio_core::reactor::Core;
 use futures::{Future, Stream, Sink};
-use futures::future::ok;
+use futures::future::{ok, err};
 use futures::sync::*;
 
 use *;
-
 
 /// Connection pool client abstraction. Must be easily cloneable. `K` is key type,
 /// `A` is connection address, and `C` is connection type
 pub trait ConnectionPool<K, A, C> {
     /// given a key, conn data, and a closure producing future of evaluation result `R` using
-    /// connection 'C', return a future of that 'R'
-    fn exec<F, R>(&self, key: K, addr: A, f: F) -> BFI<R> where
-        R: 'static,
-        F: FnOnce(C) -> BFI<(C, R)> + 'static;
+    /// connection 'C', return a future of that 'R'. If no conn data present, try to use cached or
+    /// preconfigured data for this `K`
+    fn exec<F, R>(&self, key: K, addr: Option<A>, f: F) -> BFI<R> where
+        R: Send + 'static,
+        F: FnOnce(C) -> BFI<(C, R)> + Send + 'static;
 }
 
 pub trait Connector<A, C> {
@@ -29,7 +29,7 @@ pub trait Connector<A, C> {
 
 #[derive(Debug)]
 enum CPCmd<K, A, C> {
-    Borrow(K, A, oneshot::Sender<C>),
+    Borrow(K, Option<A>, oneshot::Sender<C>),
     Return(K, C)
 }
 
@@ -58,7 +58,7 @@ pub struct AgeCheckerFactoryImpl {
 }
 
 impl AgeCheckerFactoryImpl {
-    fn new(max_age: Duration) -> AgeCheckerFactoryImpl {
+    pub fn new(max_age: Duration) -> AgeCheckerFactoryImpl {
         AgeCheckerFactoryImpl { max_age }
     }
 }
@@ -75,68 +75,132 @@ impl AgeCheckerFactory for AgeCheckerFactoryImpl {
     }
 }
 
+#[derive(Debug)]
+struct CPValue<A, C> {
+    /// Cached address
+    a: Option<A>,
+    /// The queue
+    q: VecDeque<(C, Instant)>
+}
+
+#[derive(Debug)]
+enum CPResult<A, C> {
+    Connection(C),
+    Address(A),
+    Nothing
+}
+
+impl<A, C> CPValue<A, C> where A: Clone {
+    fn new() -> CPValue<A, C> { CPValue { a: None, q: VecDeque::new() } }
+    fn new_a(a: A) -> CPValue<A, C> { CPValue { a: Some(a), q: VecDeque::new() } }
+    ///Update cached a
+    fn update_a(&mut self, oa: Option<A>) {
+        match oa {
+            a @ Some(..) => self.a = a,
+            None => ()
+        }
+    }
+
+    #[inline]
+    fn a_cpr(&self) -> CPResult<A, C>  {
+        match self.a {
+            Some(ref a) => CPResult::Address(a.clone()),
+            None => CPResult::Nothing
+        }
+    }
+    fn dequeue<AC: AgeChecker>(&mut self, ac: AC, oa: Option<A>) -> CPResult<A, C> {
+        self.update_a(oa);
+        loop {
+            match self.q.pop_front() {
+                Some((c, t)) =>
+                    if ac.is_ok(t) { break CPResult::Connection(c) }
+                None =>
+                    break self.a_cpr()
+            }
+        }
+    }
+    fn enqueue(&mut self, c: C, t: Instant) {
+        self.q.push_back((c, t))
+    }
+}
 
 
-
-/// CP impl that runs on a separate thread. `C` is connection, and `O` is connector type
+/// CP impl that can run on a separate thread. `C` is connection, and `O` is connector type
 #[derive(Debug)]
 pub struct ConnectionPoolServer<K, A, C, O, T> where
     K: Eq + Hash
 {
-    m: HashMap<K, VecDeque<(C, Instant)>>,
+    /// The pool itself
+    m: HashMap<K, CPValue<A, C>>,
+    /// connector
     o: O,
+    /// AgeChecker
     t: T,
     a_type: PhantomData<A>
 }
 
 impl<K, A, C, O, T> ConnectionPoolServer<K, A, C, O, T> where
-    K: Eq + Hash + 'static,
-    A: 'static,
-    C: 'static,
-    O: Connector<A, C> + 'static,
-    T: AgeCheckerFactory + 'static
+    K: Eq + Hash + Debug + Send + 'static,
+    A: Clone + Send + 'static,
+    C: Send + 'static,
+    O: Connector<A, C> + Send + 'static,
+    T: AgeCheckerFactory + Send + 'static
 {
-    pub fn new(o: O, t: T) -> ConnectionPoolServer<K, A, C, O, T> {
-        ConnectionPoolServer {
+    pub fn new(o: O, t: T, init_a: Vec<(K, A)>) -> ConnectionPoolServer<K, A, C, O, T> {
+        let mut rv = ConnectionPoolServer {
             m: HashMap::new(),
             o,
             t,
             a_type: PhantomData
+        };
+
+        for (k, v) in init_a {
+            rv.set_a(k, v)
+        }
+
+        rv
+    }
+
+    fn pop(&mut self, k: K, a: Option<A>) -> StdResult<CPResult<A, C>, K> {
+        match (self.m.entry(k), a) {
+            (Entry::Vacant(e), None) =>
+                Err(e.into_key()),
+            (Entry::Vacant(e), Some(a)) =>
+                Ok(e.insert(CPValue::new_a(a)).a_cpr()),
+            (Entry::Occupied(mut e), oa)  =>
+                Ok(e.get_mut().dequeue(self.t.checker(), oa))
         }
     }
 
-    fn pop(&mut self, k: K) -> Option<C> {
+    fn set_a(&mut self, k: K, a: A) {
         match self.m.entry(k) {
-            Entry::Vacant(..) => None,
-            Entry::Occupied(mut e) => {
-                loop {
-                    let checker = self.t.checker();
-                    let v = e.get_mut();
-                    match v.pop_front() {
-                        Some((c, t)) =>
-                            if checker.is_ok(t) { break Some(c) }
-                        None =>
-                            break None
-                    }
-                }
-            }
+            Entry::Vacant(e) =>
+                drop(e.insert(CPValue::new_a(a))),
+            Entry::Occupied(mut e) =>
+                e.get_mut().update_a(Some(a))
         }
     }
 
     fn push(&mut self, k: K, c: C) {
-        self.m.entry(k).or_insert_with(|| VecDeque::new()).push_back((c, T::now()))
+        self.m.entry(k).or_insert_with(|| CPValue::new()).enqueue(c, T::now())
     }
 
     fn process_cmd(mut self, w: CPCmd<K, A, C>) -> BFI<Self> {
         match w {
             CPCmd::Borrow(k, a, sk) => {
-                let f0: BFI<C> = match self.pop(k) {
-                    Some(c) => Box::new(ok(c)),
-                    None => self.o.connect(a)
+                let f0: BFI<C> = match self.pop(k, a) {
+                    Ok(CPResult::Connection(c)) =>
+                        Box::new(ok(c)),
+                    Ok(CPResult::Address(a)) =>
+                        self.o.connect(a),
+                    Ok(CPResult::Nothing) =>
+                        Box::new(err(app_error!(other "No available connection address (key unknown)").into())),
+                    Err(key) =>
+                        Box::new(err(app_error!(other "No available connection address for key `{:?}`", key).into()))
                 };
                 Box::new(f0.and_then(|c| {
                     let r = sk.send(c);
-                    if r.is_err() { trace!("cpool server: sk.send error") }
+                    if r.is_err() { debug!("cpool.server sink send error (client gone?)") }
                     //we intentionally discard a connection (error outcome) here
                     Box::new(ok(self))
                 })) as BFI<Self>
@@ -150,7 +214,7 @@ impl<K, A, C, O, T> ConnectionPoolServer<K, A, C, O, T> where
 
     fn into_future(self, r: mpsc::Receiver<CPCmd<K, A, C>>) -> BFI<Self> {
         Box::new(r
-            .map_err(|_| app_error!(other "cpool: stream reception error").into())
+            .map_err(|_| app_error!(other "cpool.server stream reception error").into())
             .fold(
                 self,
                 |cps, w| cps.process_cmd(w)
@@ -158,8 +222,10 @@ impl<K, A, C, O, T> ConnectionPoolServer<K, A, C, O, T> where
         )
     }
 
+    /*
     /// this differs from `into_future` in that it exposes the argument `r` in the loop,
     /// allowing for closing `r`
+    /// not sure if it is really needed
     fn into_future2(self, r: mpsc::Receiver<CPCmd<K, A, C>>) -> BFI<Self> {
         Box::new(r
             .into_future()
@@ -175,35 +241,24 @@ impl<K, A, C, O, T> ConnectionPoolServer<K, A, C, O, T> where
             }
         ))
     }
-}
-#[derive(Debug)]
-pub struct ConnectionPoolServerEx<K, A, C, O, T> where
-    K: Eq + Hash
-{
-    s: ConnectionPoolServer<K, A, C, O, T>,
-    r: mpsc::Receiver<CPCmd<K, A, C>>
+    */
+
 }
 
-impl<K, A, C, O, T> ConnectionPoolServerEx<K, A, C, O, T> where
-    K: Eq + Hash + 'static,
-    A: 'static,
-    C: 'static,
-    O: Connector<A, C> + 'static,
-    T: AgeCheckerFactory + 'static {
-    pub fn into_future(self) -> BFI<ConnectionPoolServer<K, A, C, O, T>> {
-        self.s.into_future(self.r)
-    }
-}
-
-
-#[derive(Clone)]
 pub struct ConnectionPoolClient<K, A, C> {
     s: mpsc::Sender<CPCmd<K, A, C>>
 }
 
+impl<K, A, C> Clone for ConnectionPoolClient<K, A, C> {
+    fn clone(&self) -> Self {
+        ConnectionPoolClient { s: self.s.clone() }
+    }
+}
+
 impl<K, A, C> ConnectionPoolClient<K, A, C> where
-    K: 'static, A: 'static, C: 'static {
-    fn borrow(&self, k: K, a: A) -> BFI<C> {
+    K: Send + 'static, A: Send + 'static, C: Send + 'static {
+
+    fn borrow(&self, k: K, a: Option<A>) -> BFI<C> {
         let (s, r) = oneshot::channel();
         Box::new(
             self.s.clone().send(CPCmd::Borrow(k, a, s))
@@ -215,14 +270,16 @@ impl<K, A, C> ConnectionPoolClient<K, A, C> where
                 )
         )
     }
+
+
 }
 
 impl<K, A, C> ConnectionPool<K, A, C> for ConnectionPoolClient<K, A, C> where
-    K: Clone + 'static, A: 'static, C: 'static {
+    K: Clone + Send + 'static, A: Send + 'static, C: Send + 'static {
 
-    fn exec<F, R>(&self, key: K, addr: A, f: F) -> BFI<R> where
-        R: 'static,
-        F: FnOnce(C) -> BFI<(C, R)> + 'static {
+    fn exec<F, R>(&self, key: K, addr: Option<A>, f: F) -> BFI<R> where
+        R: Send + 'static,
+        F: FnOnce(C) -> BFI<(C, R)> + Send + 'static {
 
         let s1 = self.s.clone();
         let k = key.clone();
@@ -238,28 +295,54 @@ impl<K, A, C> ConnectionPool<K, A, C> for ConnectionPoolClient<K, A, C> where
     }
 }
 
-pub fn create_cpool<K, A, C, O, T>(o: O, t: T, buffer: usize)
-                                   -> (ConnectionPoolClient<K, A, C>, ConnectionPoolServerEx<K, A, C, O, T>) where
-    K: Eq + Hash + 'static,
-    A: 'static,
-    C: 'static,
-    O: Connector<A, C> + 'static,
-    T: AgeCheckerFactory  + 'static {
+pub fn create_connection_pool<K, A, C, O, T>(o: O, t: T, buffer: usize, init_a: Vec<(K, A)>)
+    -> (ConnectionPoolClient<K, A, C>, BFI<ConnectionPoolServer<K, A, C, O, T>>) where
+    K: Eq + Hash + Debug + Send + 'static,
+    A: Clone + Send + 'static,
+    C: Send + 'static,
+    O: Connector<A, C> + Send + 'static,
+    T: AgeCheckerFactory  + Send + 'static {
     let (s, r) = mpsc::channel(buffer);
     let c = ConnectionPoolClient { s };
-    let srv =
-        ConnectionPoolServerEx { s: ConnectionPoolServer::new(o, t), r };
-    (c, srv)
+    let f = ConnectionPoolServer::new(o, t, init_a).into_future(r);
+    (c, f)
+}
+
+
+/// Synchronous future runner
+pub struct Runner<S> {
+    s: Option<BFI<S>>
+}
+
+impl<S> Runner<S> {
+    pub fn new(s: BFI<S>) -> Runner<S> { Runner { s: Some(s) } }
+    pub fn exec<R>(&mut self, rf: BFI<R>) -> IoResult<R> {
+        use futures::future::Either;
+        let mut s = None;
+        std::mem::swap(&mut self.s, &mut s);
+        let (r, s) = match s {
+            Some(srv) =>
+                match rf.select2(srv).wait() {
+                    Ok(Either::A((r, sf))) => (Ok(r), sf),
+                    Ok(Either::B((_s, _rf))) => return Err(app_error!(other "Premature end of server stream").into()),
+                    Err(Either::A((re, sf))) => (Err(re), sf),
+                    Err(Either::B((se, _rf))) => return Err(se)
+                },
+            None => return Err(app_error!(other "CP server dead").into()),
+        };
+        self.s = Some(s);
+        r
+    }
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
 
     pub struct TrivialAgeCheckerImpl;
 
     impl AgeChecker for TrivialAgeCheckerImpl {
-        fn is_ok(&self, t: Instant) -> bool {
+        fn is_ok(&self, _t: Instant) -> bool {
             true
         }
     }
@@ -298,93 +381,76 @@ fn test_cp_sync() {
     use self::test::*;
     use futures::future::Either;
 
-    let (c, s0) =
-        create_cpool::<String, String, String, CI, TrivialAgeCheckerFactoryImpl>(
+    let (c, s) =
+        create_connection_pool::<String, String, String, CI, TrivialAgeCheckerFactoryImpl>(
             CI { n: 0 },
             TrivialAgeCheckerFactoryImpl,
-            16
+            16,
+            vec![]
         );
-    let s = s0.into_future();
 
-    let mut core = Core::new().unwrap();
+    let mut cr = Runner::new(s);
 
-    fn ts(core: &mut Core, s: BFI<CPS>, w: BFI<String>) -> (BFI<CPS>, String) {
-        match core.run(w.select2(s)) {
-            Ok(Either::A((s, fcp))) => (fcp, s),
-            _ => panic!("Invalid test outcome")
-        }
+    macro_rules! tw {
+    ($r: expr) => { match $r {
+        WaitResult::Ok(r, sf) => (r, sf),
+        _ => panic!("Invalid test outcome")
+    }};
     }
 
-    /*
-    match result {
-        Ok(Either::A((s, fcp))) => println!("S is: {}", s), //S is: CONN-0-cd(A)-x
-        Ok(Either::B((cp, fs))) => println!("S error"),
-        Err(Either::A((se, fcp))) => println!("run error 1 {}", se),
-        Err(Either::B((cpe, fs))) => println!("run error 2 {}", cpe),
-    }*/
+    let r = cr.exec(c.exec(
+        "A".to_owned(),
+        Some("cA".to_owned()),
+        |c| { let r = c.clone() + "-x";  Box::new(ok((c, r))) }
+        ));
 
-    let (s, r) = ts(
-        &mut core, s,
-        c.exec(
+    assert_eq!(r.unwrap(),"CONN-0-cA-x");
+
+    let r = cr.exec(c.exec(
             "A".to_owned(),
-            "cA".to_owned(),
-            |c| { let r = c.clone() + "-x";  Box::new(ok((c, r))) }
-        )
-    );
-
-
-    assert_eq!(r, "CONN-0-cA-x");
-
-    let (s, r) = ts(
-        &mut core, s,
-        c.exec(
-            "A".to_owned(),
-            "cA".to_owned(),
+            Some("cA".to_owned()),
             |c| { let r = c.clone() + "-y";  Box::new(ok((c, r))) }
-        )
-    );
+        ));
 
-    assert_eq!(r, "CONN-0-cA-y");
+    assert_eq!(r.unwrap(), "CONN-0-cA-y");
 
-    let (s, r) = ts(
-        &mut core, s,
-        c.exec(
+    let r = cr.exec(c.exec(
             "B".to_owned(),
-            "cB".to_owned(),
+            Some("cB".to_owned()),
             |c| { let r = c.clone() + "-z";  Box::new(ok((c, r))) }
-        )
-    );
+        ));
 
-    assert_eq!(r, "CONN-1-cB-z");
+    assert_eq!(r.unwrap(), "CONN-1-cB-z");
 }
+
 #[test]
 fn test_cp_async() {
     use self::test::*;
 
     let (c, s) =
-        create_cpool::<String, String, String, CI, TrivialAgeCheckerFactoryImpl>(
+        create_connection_pool::<String, String, String, CI, TrivialAgeCheckerFactoryImpl>(
             CI { n: 0 },
             TrivialAgeCheckerFactoryImpl,
-            16
+            16,
+            vec![]
         );
 
-    let t = std::thread::spawn(move || {
-        let _ = s.into_future().wait();
+    let _t = std::thread::spawn(move || {
+        let _ = s.wait();
     });
 
-    let mut core = Core::new().unwrap();
 
-    fn ts(core: &mut Core, w: BFI<String>) -> String {
-        match core.run(w) {
+    fn ts(w: BFI<String>) -> String {
+        match w.wait() {
             Ok(s) => s,
             _ => panic!("Invalid test outcome")
         }
     }
 
-    let r = ts(&mut core,
+    let r = ts(
     c.exec(
         "A".to_owned(),
-        "cA".to_owned(),
+        Some("cA".to_owned()),
         |c| { let r = c.clone() + "-x";  Box::new(ok((c, r))) }
         )
     );
@@ -397,23 +463,21 @@ fn test_cp_async() {
 pub trait SyncConnectionPool {
     //fn run_nn<P>(&mut self, p: P) -> Box<Future<Item=P, Error=IoError>> where P: nn::ProtocolFsm;
     fn call_nn(&mut self, q: nn::NnQ) -> Result<nn::NnR>;
-    fn run_nn<P>(&mut self, p: P) -> Result<P> where P: nn::ProtocolFsm + 'static;
+    fn run_nn<P>(&mut self, p: P) -> Result<P> where P: nn::ProtocolFsm + Send + 'static;
 }
 
 pub struct SyncConnectionPoolST {
     pooled: Option<nn::Connection>,
     nn_saddr: SocketAddr,
-    core: Core,
     eff_user: String
 }
 
 impl SyncConnectionPoolST {
     pub fn new(cfg: &config::Common) -> Result<SyncConnectionPoolST> {
-        let addr = cfg.nn_hostport.to_socket_addrs()?.next().ok_or(app_error!(other "NN host not found"))?;
+        let addr = (&cfg.nn_host as &str, cfg.nn_port).to_socket_addrs()?.next().ok_or(app_error!(other "NN host not found"))?;
         Ok(SyncConnectionPoolST {
             pooled: None,
             nn_saddr: addr,
-            core: Core::new()?,
             eff_user: cfg.effective_user.clone()
         })
     }
@@ -428,7 +492,6 @@ impl SyncConnectionPoolST {
         let f0 = match c {
             Some(c) => Box::new(ok(c)),
             None => nn::Connection::connect(
-                &self.core.handle(),
                 &self.nn_saddr,
                 self.eff_user.clone()
             )
@@ -437,7 +500,7 @@ impl SyncConnectionPoolST {
         let fu =
             f0.and_then(|conn| f(conn));
 
-        let (r, c) = self.core.run(fu)?;
+        let (r, c) = fu.wait()?;
         self.pooled = Some(c);
         Ok(r)
     }
@@ -448,7 +511,7 @@ impl SyncConnectionPool for SyncConnectionPoolST {
         self.for_nn(|c| c.call(q))
     }
 
-    fn run_nn<P>(&mut self, p: P) -> Result<P> where P: nn::ProtocolFsm + 'static {
+    fn run_nn<P>(&mut self, p: P) -> Result<P> where P: nn::ProtocolFsm + Send + 'static {
         self.for_nn(|c| Box::new(c.run(p).map(|(c, p)| (p, c))))
     }
 }

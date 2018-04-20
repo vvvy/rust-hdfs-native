@@ -1,14 +1,16 @@
 
 
 pub struct Common {
-    pub nn_hostport: String,
+    pub nn_host: String,
+    pub nn_port: u16,
     pub effective_user: String
 }
 
 impl Default for Common {
     fn default() -> Self {
         Common {
-            nn_hostport: "127.0.0.1:8020".to_owned(),
+            nn_host: "127.0.0.1".to_owned(),
+            nn_port: 8020,
             effective_user: "cloudera".to_owned()
         }
     }

@@ -14,6 +14,7 @@ use codec_tools::*;
 
 const DATA_TRANSFER_VERSION: u16 = 28;
 
+#[allow(dead_code)]
 #[derive(Copy, Clone)]
 enum Op {
     WriteBlock = 80,
@@ -159,10 +160,10 @@ impl Encoder for DtCodec {
                 encoder::varint_u32().encode(crs, dst)
             ),
 
-            _ => (
-                DtCodec::Null,
-                Err(app_error!(other "invalid operation on OpBlockReadCodec::encode"))
-            ),
+            //_ => (
+            //    DtCodec::Null,
+            //    Err(app_error!(other "invalid operation on OpBlockReadCodec::encode"))
+            //),
 
         };
         *self = s;

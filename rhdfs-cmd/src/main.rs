@@ -29,13 +29,21 @@ fn main() {
 
 fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
 
-    let mut cp = SyncConnectionPoolST::new(&cfg)?;
+    //TODO: move args to config
+    let (c, s) =
+        create_reactor(
+            16,
+            std::time::Duration::new(10,0),
+            vec![(default_nn_key(), CAddr::NN { host: cfg.nn_host.clone(), port: cfg.nn_port, eff_user: cfg.effective_user.clone() })]
+        );
+
+    let mut rr = ReactorRunner::new(s);
 
     match cmd {
         Command::GetListing(args) =>
-            get_listing(&mut cp, args),
+            get_listing(&mut rr, &c, args),
         Command::Get(args) =>
-            get(&mut cp, args),
+            get(&mut rr, &c, args),
         Command::Version =>
             version(),
         Command::Help|Command::Null =>
@@ -59,7 +67,7 @@ fn test_perms_s() {
 
 }
 
-fn get_listing(cp: &mut SyncConnectionPoolST, args: args::GetListing) -> Result<()> {
+fn get_listing(r: &mut ReactorRunner, c: &ReactorClient, args: args::GetListing) -> Result<()> {
     struct PSink {
         src: Vec<String>
     }
@@ -103,16 +111,81 @@ fn get_listing(cp: &mut SyncConnectionPoolST, args: args::GetListing) -> Result<
     }
 
     let src2 = args.src.clone();
-    let _ = hdfs::get_listing(
-        cp,
+    let _ = r.exec(hdfs::get_listing(
+        c,
         config::GetListing { src: args.src, need_location: false },
-        Box::new(PSink { src: src2 })
-    )?;
+        PSink { src: src2 }
+    ))?;
     Ok(())
 }
 
-fn get(cp: &mut SyncConnectionPoolST, args: args::Get) -> Result<()> {
-    let _ = hdfs::get(cp, config::Get { src: args.fs, tgt_dir: None } )?;
+use std::path::{Path, PathBuf};
+
+fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
+    use std::ffi::OsStr;
+
+    #[inline]
+    fn extract_file_name(path: &Path) -> Result<&OsStr> {
+        path.file_name().ok_or_else(|| app_error!(other "invalid source file `{}`", path.display()))
+    }
+
+    fn replicate_file_name(from: &str, to: &Path) -> Result<PathBuf> {
+        Ok(to.join(extract_file_name(&Path::new(from))?))
+    }
+
+    match fs.len() {
+        0 => Ok(vec![]),
+        1 => {
+            //extract filename from src
+            let file = fs.pop().unwrap();
+            let dpath = extract_file_name(&Path::new(&file))?.into();
+            Ok(vec![(file, dpath)])
+        }
+        2 => {
+            let dst = fs.pop().unwrap();
+            let src = fs.pop().unwrap();
+            let dpath = Path::new(&dst);
+            if dpath.is_dir() {
+                let d = replicate_file_name(&src, dpath)?;
+                Ok(vec![(src, d)])
+            } else if dpath.is_file() {
+                Err(app_error!(other "File exists: `{}`", dpath.display()))
+            } else {
+                Ok(vec![(src, dpath.into())])
+            }
+        }
+        _ => {
+            let dst = fs.pop().unwrap();
+            let dpath = Path::new(&dst);
+            if !dpath.is_dir() {
+                return Err(app_error!(other "The target directory `{}` does not exist, is not a directory, or is inaccessible", dpath.display()))
+            }
+            let mut rv = Vec::new();
+            for s in fs {
+                let dfile = replicate_file_name(&s, dpath)?;
+                if dfile.exists() {
+                    return Err(app_error!(other "File exists: `{}`", dfile.display()))
+                }
+                rv.push((s, dfile))
+            }
+            Ok(rv)
+        }
+    }
+
+}
+
+
+fn get(r: &mut ReactorRunner, c: &ReactorClient, args: args::Get) -> Result<()> {
+    use std::fs::File;
+
+    let copy_vec = build_copy_list(args.fs)?;
+
+    //TODO add some parallelism here
+    for (src, dst) in copy_vec {
+        let of = File::create(dst)?;
+        r.exec(hdfs::get(c, src, of))?;
+    }
+
     Ok(())
 }
 
@@ -161,13 +234,21 @@ mod args {
     }
 
     pub struct Get {
-        pub fs: Vec<String>
+        /// path arguments as they are listed in the command line. The trailing arg is probably
+        /// a target dir
+        pub fs: Vec<String>,
+        pub p: bool,
+        pub ignore_crc: bool,
+        pub crc: bool
     }
 
     impl Default for Get {
         fn default() -> Self {
             Get {
-                fs: vec![]
+                fs: vec![],
+                p: false,
+                ignore_crc: false,
+                crc: false
             }
         }
     }
@@ -198,7 +279,8 @@ fn parse_command_line() -> (Command, config::Common) {
                     },
                     Some(ref a0) => {
                         match a0.as_ref() {
-                            "-nn" => cfg.nn_hostport = a,
+                            "-nn" => cfg.nn_host = a,
+                            "-nnport" => cfg.nn_port = a.parse().expect2("`-nnport` must be followed by a short int"),
                             "-u" => cfg.effective_user = a,
                             _ => error_exit(&format!("Invalid cmd line at `{} {}`", a0, a), "unknown option")
                         };
@@ -223,7 +305,12 @@ fn parse_command_line() -> (Command, config::Common) {
                 None
             },
             &mut Command::Get(ref mut args) => {
-                args.fs.push(a);
+                match a.as_ref() {
+                    "-p" => args.p = true,
+                    "-ignoreCrc" => args.ignore_crc = true,
+                    "-crc" => args.crc = true,
+                    _ => args.fs.push(a)
+                };
                 None
             },
             &mut Command::Help | &mut Command::Version => None

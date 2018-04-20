@@ -147,6 +147,7 @@ pub enum RpcCodec<A> where A: RpcCodecA, A::S: Decoder<Item=RpcRsp<A::R>, Error=
 
 impl<A> RpcCodec<A> where A: RpcCodecA, A::S: Decoder<Item=RpcRsp<A::R>, Error=Error> + Debug {
     pub fn new() -> RpcCodec<A> { RpcCodec::Uninitialized }
+    #[cfg(test)]
     fn null() -> RpcCodec<A> { RpcCodec::Null }
 }
 
