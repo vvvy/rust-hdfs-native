@@ -14,30 +14,16 @@ use super::codec::{NnCodec, NnQ, NnR, RpcReq, RpcRsp, HandshakeContext, OpContex
 
 pub enum ProtocolFsmResult {
     Send(NnQ),
-    Success,
-    Err(IoError)
+    Exit
 }
 
 /// Protocol FSM event handler
-pub trait ProtocolFsm {
+pub trait ProtocolFsm: ErrorAccumulator {
     /// called upon start of operation
     fn start(self) -> (ProtocolFsmResult, Self);
     /// called upon incoming message arrival
     fn incoming(self, NnR) -> (ProtocolFsmResult, Self);
 }
-
-/*
-/// Protocol FSM event handler (trait object version)
-pub trait ProtocolFsmO {
-    /// called upon start of operation
-    fn start(&self) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
-    /// called upon incoming message arrival
-    fn incoming(&self, NnR) -> (ProtocolFsmResult, Box<ProtocolFsmO>);
-}
-*/
-
-
-
 
 pub struct Connection {
     io: Framed<TcpStream, NnCodec>,
@@ -171,22 +157,26 @@ impl Connection {
         Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
     }
 
-    pub fn run<P>(self, p: P) -> BFI<(Connection, P)>
+    pub fn run<P>(self, p: P) -> BF<(Connection, P), P>
         where P: ProtocolFsm + Send + 'static
     {
         self.fsm_result(p.start())
     }
 
-    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> BFI<(Connection, P)>
+    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> BF<(Connection, P), P>
         where P: ProtocolFsm + Send + 'static
     {
         match r {
             ProtocolFsmResult::Send(q) =>
-                Box::new(self.call(q).and_then(|(r, c)| c.fsm_result(p.incoming(r)))),
-            ProtocolFsmResult::Success =>
+                Box::new(self
+                    .call(q)
+                    .then(|w| match w {
+                        Ok((r, c)) => c.fsm_result(p.incoming(r)),
+                        Err(e) => Box::new(err(p.error(e)))
+                    })
+                ),
+            ProtocolFsmResult::Exit =>
                 Box::new(ok((self, p))),
-            ProtocolFsmResult::Err(e) =>
-                Box::new(err(e))
         }
     }
 }
@@ -195,8 +185,9 @@ impl Connection {
 #[derive(Debug)]
 pub enum CallW {
     Q(NnQ),
+    Waiting,
     R(NnR),
-    Null
+    Err(IoError)
 }
 
 impl CallW {
@@ -206,17 +197,21 @@ impl CallW {
 impl ProtocolFsm for CallW {
     fn start(self) -> (ProtocolFsmResult, Self) {
         match self {
-            CallW::Q(q) => (ProtocolFsmResult::Send(q), CallW::Null),
-            x => (ProtocolFsmResult::Err(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x).into()), CallW::Null)
+            CallW::Q(q) => (ProtocolFsmResult::Send(q), CallW::Waiting),
+            x => (ProtocolFsmResult::Exit, CallW::Err(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x).into()))
         }
     }
 
     fn incoming(self, r: NnR) -> (ProtocolFsmResult, Self) {
         match self {
-            CallW::Null => (ProtocolFsmResult::Success, CallW::R(r)),
-            x => (ProtocolFsmResult::Err(app_error!(other "invalid CallWrapper state: expected Null, got `{:?}`", x).into()), CallW::Null)
+            CallW::Waiting => (ProtocolFsmResult::Exit, CallW::R(r)),
+            x => (ProtocolFsmResult::Exit, CallW::Err(app_error!(other "invalid CallWrapper state: expected Null, got `{:?}`", x).into()))
         }
     }
+}
+
+impl ErrorAccumulator for CallW {
+    fn error(self, e: IoError) -> Self { CallW::Err(e) }
 }
 
 

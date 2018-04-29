@@ -13,3 +13,17 @@ impl<T, E> ErrorConverter<StdResult<T, E>> for Result<T> where E: From<Error> {
         self.map_err(|e| E::from(e))
     }
 }
+
+pub fn result_from_errors<E: Into<Error> + std::fmt::Display>(mut errs: Vec<E>) -> Result<()> {
+    let e = errs.pop();
+    e.map_or(
+        Ok(()),
+        |e| Err(
+            if errs.is_empty() {
+                e.into()
+            } else {
+                app_error!(other "Multiple errors found, the last is: {}", e)
+            }
+        )
+    )
+}

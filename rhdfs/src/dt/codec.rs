@@ -118,6 +118,15 @@ pub enum DtReq {
     ClientReadStatus(ClientReadStatusProto)
 }
 
+impl DtReq {
+    pub fn set_client_name(&mut self, client_name: &str) {
+        match self {
+            &mut DtReq::ReadBlock(ref mut orbp) => orbp.mut_header().set_clientName(client_name.to_owned()),
+            &mut DtReq::ClientReadStatus(..) => ()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DtRsp {
     ReadBlock(OpBlockReadMessage)
@@ -320,7 +329,7 @@ a9:c7:c0:1b
             .to_bytes(),
         &b[..]
     );
-    let r = c.decode(&mut b);
+    let _ = c.decode(&mut b);
     //3R. Ok(Some(Packet(BlockDataPacket { header: offsetInBlock: 5 seqno: 1 lastPacketInBlock: true dataLen: 0, checksum: b"", data: b"" })))
     //println!("3R. {:?}", r);
 
@@ -331,7 +340,7 @@ a9:c7:c0:1b
     //println!("4B. {}", HexSlice::new(&b[..]));
     assert!(b.is_empty());
 
-    let r = c.decode(&mut b);
+    let _ = c.decode(&mut b);
     //4R. Ok(Some(End))
     //println!("4R. {:?}", r);
 

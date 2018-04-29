@@ -28,13 +28,27 @@ fn main() {
 }
 
 fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
+    use std::net::ToSocketAddrs;
+
+    //replace "local" with "127.0.0.1:8020"
+    let nn_hostport = match cfg.nn_hostport.as_ref() {
+        "local" => "127.0.0.1:8020",
+        r => r
+    };
+
+    //resolve namenode host ip
+    let nn = nn_hostport
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| app_error!(other "Could not resolve namenode host in `{}`", cfg.nn_hostport))?;
 
     //TODO: move args to config
     let (c, s) =
         create_reactor(
             16,
             std::time::Duration::new(10,0),
-            vec![(default_nn_key(), CAddr::NN { host: cfg.nn_host.clone(), port: cfg.nn_port, eff_user: cfg.effective_user.clone() })]
+            vec![(default_nn_key(), CAddr::NN(nn))],
+            SessionData { effective_user: cfg.effective_user.clone()  }
         );
 
     let mut rr = ReactorRunner::new(s);
@@ -69,8 +83,10 @@ fn test_perms_s() {
 
 fn get_listing(r: &mut ReactorRunner, c: &ReactorClient, args: args::GetListing) -> Result<()> {
     struct PSink {
-        src: Vec<String>
+        src: Vec<String>,
+        err: Vec<IoError>
     }
+
     impl hdfs::ListingSink for PSink {
         fn files(&mut self, fs: &[HdfsFileStatusProto], src_pos: usize, _last_in_src: bool, _last: bool) {
             use self::chrono::prelude::*;
@@ -110,13 +126,26 @@ fn get_listing(r: &mut ReactorRunner, c: &ReactorClient, args: args::GetListing)
         }
     }
 
+    impl ErrorAccumulator for PSink {
+        fn error(self, e: IoError) -> Self {
+            PSink { err: vec_cons(self.err, e), ..self}
+        }
+    }
+
+    impl ErrorExtractor for PSink {
+        fn extract_errors(mut self) -> (Vec<IoError>, Self) {
+            (std::mem::replace(&mut self.err, vec![]), self)
+        }
+    }
+
     let src2 = args.src.clone();
-    let _ = r.exec(hdfs::get_listing(
+    let (errs, _) = r.exec_x(hdfs::get_listing(
         c,
         config::GetListing { src: args.src, need_location: false },
-        PSink { src: src2 }
-    ))?;
-    Ok(())
+        PSink { src: src2, err: vec![] }
+    ));
+
+    result_from_errors(errs)
 }
 
 use std::path::{Path, PathBuf};
@@ -182,8 +211,11 @@ fn get(r: &mut ReactorRunner, c: &ReactorClient, args: args::Get) -> Result<()> 
 
     //TODO add some parallelism here
     for (src, dst) in copy_vec {
+        debug!("Copying {} -> {}", src, dst.display());
         let of = File::create(dst)?;
-        r.exec(hdfs::get(c, src, of))?;
+        let (errs, get) = r.exec_x(hdfs::get(c, src, of));
+        debug!("get result: {:?} {:?}", errs, get);
+        let _ = result_from_errors(errs)?;
     }
 
     Ok(())
@@ -279,8 +311,7 @@ fn parse_command_line() -> (Command, config::Common) {
                     },
                     Some(ref a0) => {
                         match a0.as_ref() {
-                            "-nn" => cfg.nn_host = a,
-                            "-nnport" => cfg.nn_port = a.parse().expect2("`-nnport` must be followed by a short int"),
+                            "-fs" => cfg.nn_hostport = a,
                             "-u" => cfg.effective_user = a,
                             _ => error_exit(&format!("Invalid cmd line at `{} {}`", a0, a), "unknown option")
                         };

@@ -83,7 +83,9 @@ pub use protocolpb::proto::hdfs::hdfs::{
     HdfsFileStatusProto_FileType,
     FsPermissionProto,
     LocatedBlocksProto,
-    LocatedBlockProto
+    LocatedBlockProto,
+    DatanodeInfoProto,
+    DatanodeIDProto
 };
 
 pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
@@ -111,6 +113,9 @@ pub use protocolpb::proto::hadoop::ProtobufRpcEngine::{
     RequestHeaderProto
 };
 
+pub use protocolpb::proto::hadoop::Security::{
+    TokenProto
+};
 
 
 /// Protobuf API abstraction layer.
@@ -153,16 +158,43 @@ macro_rules! pbdb {
 
 { FsPermissionProto, perm, $a:tt }=> { pbdbf!{ get_perm, set_perm, $a } };
 
+// (file_length, blocks, under_construction, last_block, is_last_block_complete, file_encryption_info)
 { LocatedBlocksProto, file_length, $a:tt }=> { pbdbf!{ get_fileLength, set_fileLength, $a } };
+{ LocatedBlocksProto, blocks, $a:tt }=> { pbdbf!{ get_blocks, set_blocks, $a } };
 { LocatedBlocksProto, under_construction, $a:tt }=> { pbdbf!{ get_underConstruction, set_underConstruction, $a } };
 { LocatedBlocksProto, last_block, $a:tt }=> { pbdbf!{ get_lastBlock, set_lastBlock, $a } };
 { LocatedBlocksProto, is_last_block_complete, $a:tt }=> { pbdbf!{ get_isLastBlockComplete, set_isLastBlockComplete, $a } };
 { LocatedBlocksProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, $a } };
 
+// (b, offset, locs, corrupt, block_token, is_cached, storage_types, storage_ids)
 { LocatedBlockProto, b, $a:tt }=> { pbdbf!{ get_b, set_b, $a } };
 { LocatedBlockProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
+{ LocatedBlockProto, locs, $a:tt }=> { pbdbf!{ get_locs, set_locs, $a } };
 { LocatedBlockProto, corrupt, $a:tt }=> { pbdbf!{ get_corrupt, set_corrupt, $a } };
 { LocatedBlockProto, block_token, $a:tt }=> { pbdbf!{ get_blockToken, set_blockToken, $a } };
+{ LocatedBlockProto, is_cached, $a:tt }=> { pbdbf!{ get_isCached, set_isCached, $a } };
+{ LocatedBlockProto, storage_types, $a:tt }=> { pbdbf!{ get_storageTypes, set_storageTypes, $a } };
+{ LocatedBlockProto, storage_ids, $a:tt }=> { pbdbf!{ get_storageIDs, set_storageIDs, $a } };
+
+{ DatanodeInfoProto, id, $a:tt }=> { pbdbf!{ get_id, set_id, $a } };
+{ DatanodeInfoProto, capacity, $a:tt }=> { pbdbf!{ get_capacity, set_capacity, $a } };
+{ DatanodeInfoProto, dfs_used, $a:tt }=> { pbdbf!{ get_dfsUsed, set_dfsUsed, $a } };
+{ DatanodeInfoProto, remaining, $a:tt }=> { pbdbf!{ get_remaining, set_remaining, $a } };
+{ DatanodeInfoProto, block_pool_used, $a:tt }=> { pbdbf!{ get_blockPoolUsed, set_blockPoolUsed, $a } };
+{ DatanodeInfoProto, last_update, $a:tt }=> { pbdbf!{ get_lastUpdate, set_lastUpdate, $a } };
+{ DatanodeInfoProto, xceiver_count, $a:tt }=> { pbdbf!{ get_xceiverCount, set_xceiverCount, $a } };
+{ DatanodeInfoProto, location, $a:tt }=> { pbdbf!{ get_location, set_location, $a } };
+{ DatanodeInfoProto, admin_state, $a:tt }=> { pbdbf!{ get_adminState, set_adminState, $a } };
+{ DatanodeInfoProto, cache_capacity, $a:tt }=> { pbdbf!{ get_cacheCapacity, set_cacheCapacity, $a } };
+{ DatanodeInfoProto, cache_used, $a:tt }=> { pbdbf!{ get_cacheUsed, set_cacheUsed, $a } };
+
+{ DatanodeIDProto, ip_addr, $a:tt }=> { pbdbf!{ get_ipAddr, set_ipAddr, $a } };
+{ DatanodeIDProto, host_name, $a:tt }=> { pbdbf!{ get_hostName, set_hostName, $a } };
+{ DatanodeIDProto, datanode_uuid, $a:tt }=> { pbdbf!{ get_datanodeUuid, set_datanodeUuid, $a } };
+{ DatanodeIDProto, xfer_port, $a:tt }=> { pbdbf!{ get_xferPort, set_xferPort, $a } };
+{ DatanodeIDProto, info_port, $a:tt }=> { pbdbf!{ get_infoPort, set_infoPort, $a } };
+{ DatanodeIDProto, ipc_port, $a:tt }=> { pbdbf!{ get_ipcPort, set_ipcPort, $a } };
+{ DatanodeIDProto, info_secure_port, $a:tt }=> { pbdbf!{ get_infoSecurePort, set_infoSecurePort, $a } };
 
 //RPC
 { RpcRequestHeaderProto, rpc_kind, $a:tt } => { pbdbf!{ get_rpcKind, set_rpcKind, $a } };
@@ -210,6 +242,7 @@ macro_rules! pbdb {
 { PacketHeaderProto, data_len, $a:tt} => { pbdbf!{ get_dataLen, set_dataLen, $a } };
 
 { BaseHeaderProto, block, $a:tt} => { pbdbf!{ get_block, set_block, $a } };
+{ BaseHeaderProto, token, $a:tt} => { pbdbf!{ get_token, set_token, $a } };
 
 { ClientReadStatusProto, status, $a:tt } => { pbdbf!{ get_status, set_status, $a } };
 

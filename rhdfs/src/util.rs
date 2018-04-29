@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use std::fmt::{Debug, Display};
+use std::fmt;
+use std::fmt::Debug;
+
 
 /// Vector of `n` default values
 #[inline]
@@ -26,6 +28,28 @@ pub fn to_vector_of_size<T: Default + Clone>(v: &mut Vec<T>, n: usize) -> () {
 }
 */
 
+
+pub fn vec_cons<T>(mut v: Vec<T>, t: T) -> Vec<T> {
+    v.push(t);
+    v
+}
+
+pub fn vec_cons_opt<T>(mut v: Vec<T>, t: Option<T>) -> Vec<T> {
+    t.map(|t| v.push(t));
+    v
+}
+pub trait LazyMonoid<T> {
+    fn lazy_plus<F>(self, F) -> T where F: FnOnce() -> T;
+}
+
+impl<T, E> LazyMonoid<Result<Option<T>, E>> for Result<Option<T>, E> {
+    fn lazy_plus<F>(self, t: F) -> Result<Option<T>, E> where F: FnOnce() -> Result<Option<T>, E> {
+        match self {
+            r @ Ok(Some(..)) | r @ Err(..) => r,
+            Ok(None) => t()
+        }
+    }
+}
 
 
 
@@ -95,8 +119,7 @@ pub fn logging_fsm_turn<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut
 
 
 
-//----------------
-use std::fmt::{Formatter, Result};
+
 
 /// Compact binary writer
 /// If a slice is longer than `T` bytes, writes only `LH` initial bytes followed by
@@ -110,9 +133,9 @@ impl<'a> CBinary<'a> {
     const LT: usize = 16;
 }
 
-impl<'a> Display for CBinary<'a> {
-    fn fmt(&self, fmt: &mut Formatter) -> Result {
-        fn cw(a: &[u8], fmt: &mut Formatter) -> Result {
+impl<'a> fmt::Display for CBinary<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fn cw(a: &[u8], fmt: &mut fmt::Formatter) -> fmt::Result {
             write!(fmt, "b\"")?;
             for &c in a {
                 // https://doc.rust-lang.org/reference.html#byte-escapes
@@ -137,7 +160,7 @@ impl<'a> Display for CBinary<'a> {
             Ok(())
         }
 
-        fn xw(a: &[u8], fmt: &mut Formatter) -> Result {
+        fn xw(a: &[u8], fmt: &mut fmt::Formatter) -> fmt::Result {
             for byte in a {
                 write!(fmt, "{:02x} ", byte)?;
             }

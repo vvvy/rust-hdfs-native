@@ -402,7 +402,7 @@ fn test_g_nn_codec_read_listing() {
     let r = c.decode(&mut br);
     assert_enum_variant!(c, RpcCodec::Null);
     //println!("{:?}", r);
-    let (header, resp) = match r {
+    let (header, _resp) = match r {
         Ok(Some(RpcRsp { header, payload: Some(NnR::GetListing(gl)) })) => (header, gl),
         other => panic!("Invalid resp: {:?}", other)
     };

@@ -15,6 +15,7 @@ byteorder = "1.2"
 bytes = "0.4"
 crc = "^1.0.0"
 uuid = { version = "0.6", features = ["v4"] }
+rand = "0.4"
 log = "0.4"
 
 protocolpb = { path = "../protocolpb" }

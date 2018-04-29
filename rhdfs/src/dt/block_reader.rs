@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+
 use std::io::Write;
 use std::fmt;
 use std::fmt::Debug;
@@ -144,7 +144,6 @@ impl<W: Write> BlockReadTracker<W> {
         Ok(())
     }
 
-
     fn apply(mut self, p: BlockDataPacket) -> Self {
         trace!(target: "dt_proto", "BlockReadTracker: packet header={:?}, dlen={}, cksumlen={}", p.header, p.data.len(), p.checksum.len());
         //if there is a remote error - do nothing, else
@@ -175,7 +174,7 @@ impl<W: Write> BlockReadTracker<W> {
         (s, self.remote_error, self.local_error, self.w)
     }
 }
-
+/*
 pub struct ReadBlockRequest<'a> {
     pub pool_id: &'a str,
     pub block_id: u64,
@@ -183,92 +182,121 @@ pub struct ReadBlockRequest<'a> {
     pub offset: u64,
     pub num_bytes: u64
 }
-
+*/
 
 #[derive(Debug)]
-pub enum OpReadBlockFsm<W: Write + Send> {
+pub enum ReadBlock<W: Write + Send> {
     Null(OpReadBlockProto, W),
     ResponseWait(W),
     Packet(BlockReadTracker<W>),
 
     //final states
     Success(Option<Error>, Option<Error>, W),
-    Error(BlockOpResponseProto, W)
+    ServerError(BlockOpResponseProto, W),
+    OtherError(IoError, W)
 }
 
-impl<W> OpReadBlockFsm<W> where
+impl<W> ReadBlock<W> where
     W: Write + Send + Debug + 'static {
-    pub fn new<'a, 'b>(r: ReadBlockRequest<'a>, client_name: &'b str, w: W) -> OpReadBlockFsm<W> {
+
+    pub fn new(h: BaseHeaderProto, offset: u64, len: u64, w: W) -> ReadBlock<W> {
         let orbp = pb_cons!(OpReadBlockProto,
             header: pb_cons!(ClientOperationHeaderProto,
-                client_name: client_name.to_owned(),
-                base_header: pb_cons!(BaseHeaderProto,
-                    block: pb_cons!(ExtendedBlockProto,
-                        pool_id: r.pool_id.to_owned(),
-                        block_id: r.block_id,
-                        generation_stamp: r.generation_stamp,
-                        num_bytes: r.num_bytes
-                    )
-                )
+                //client_name: client_name.to_owned(),
+                base_header: h
             ),
-            offset: r.offset,
-            len: r.num_bytes
+            offset: offset,
+            len: len
         );
 
-        OpReadBlockFsm::Null(orbp,w)
+        ReadBlock::Null(orbp,w)
     }
 
-    pub fn result(self) -> Result<W> {
+    pub fn extract_resources(self) -> W {
         match self {
-            OpReadBlockFsm::Success(None, None, w) =>
-                Ok(w),
-            OpReadBlockFsm::Success(r, l, _w) =>
-                Err(r.unwrap_or_else(|| l.unwrap_or_else(|| app_error!(unreachable)))),
-            OpReadBlockFsm::Error(borp, _) => {
+            ReadBlock::Null(_, w) |
+            ReadBlock::ResponseWait(w) |
+            ReadBlock::Packet(BlockReadTracker { w, .. }) |
+            ReadBlock::Success(_, _, w) |
+            ReadBlock::ServerError(_, w) |
+            ReadBlock::OtherError(_, w) =>
+                w
+        }
+    }
+
+    #[inline]
+    fn errvec(e1: Option<Error>, e2: Option<Error>, e3: Option<Error>) -> Vec<Error> {
+        let mut rv = Vec::new();
+        if let Some(e) = e1  { rv.push(e) }
+        if let Some(e) = e2  { rv.push(e) }
+        if let Some(e) = e3  { rv.push(e) }
+        rv
+    }
+
+    pub fn result(self) -> (W, Vec<Error>) {
+        match self {
+            ReadBlock::Success(r, l, w) =>
+                (w, Self::errvec(r, l, None)),
+            ReadBlock::ServerError(borp, w) => {
                 let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
-                Err( app_error!(dt s, m))
+                (w, vec![app_error!(dt s, m)])
             },
-            other =>
-                Err(app_error!(other "invalid OpReadBlockFsm terminal state: {:?}", other))
+            ReadBlock::OtherError(e, w) =>
+                (w, vec![e.into()]),
+            ReadBlock::Packet(BlockReadTracker { w, remote_error, local_error, .. }) =>
+                (w, Self::errvec(remote_error, local_error, Some(app_error!(other "invalid ReadBlock terminal state: Packet")))),
+            ReadBlock::ResponseWait(w) =>
+                (w, vec![app_error!(other "invalid ReadBlock terminal state: ResponseWait")]),
+            ReadBlock::Null(_, w) =>
+                (w, vec![app_error!(other "invalid ReadBlock terminal state: Null")])
         }
     }
 }
 
-impl<W> ProtocolFsm for OpReadBlockFsm<W> where W: Write + Send + Debug {
-    fn idle(self) -> (ProtocolFsmResult, OpReadBlockFsm<W>) {
+impl<W> ProtocolFsm for ReadBlock<W> where W: Write + Send + Debug + 'static {
+    fn idle(self) -> (ProtocolFsmResult, ReadBlock<W>) {
         match self {
-            OpReadBlockFsm::Null(orbp, w) =>
-                pfsm!(send(DtReq::ReadBlock(orbp)) / goto OpReadBlockFsm::ResponseWait(w)),
-            s @ OpReadBlockFsm::ResponseWait(..) =>
+            ReadBlock::Null(orbp, w) =>
+                pfsm!(send(DtReq::ReadBlock(orbp)) / goto ReadBlock::ResponseWait(w)),
+            s @ ReadBlock::ResponseWait(..) =>
                 pfsm!(wait/ goto s),
-            s @ OpReadBlockFsm::Packet(..) =>
+            s @ ReadBlock::Packet(..) =>
                 pfsm!(wait/ goto s),
-            s @ OpReadBlockFsm::Success(..) =>
-                pfsm!(return result s),
-            s =>
-                pfsm!(invalid ("<idle event>") in (s))
+            s @ ReadBlock::Success(..) =>
+                pfsm!(exit s),
+            s @ ReadBlock::ServerError(..) | s @ ReadBlock::OtherError(..) =>
+                pfsm!(exit s)
         }
     }
 
-    fn incoming(self, rsp: DtRsp) -> (ProtocolFsmResult, OpReadBlockFsm<W>) {
+    fn incoming(self, rsp: DtRsp) -> (ProtocolFsmResult, ReadBlock<W>) {
         match (self, rsp) {
-            (OpReadBlockFsm::ResponseWait(w), DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, borp))) =>
+            (ReadBlock::ResponseWait(w), DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, borp))) =>
                 if has_data {
-                    pfsm!(wait / goto OpReadBlockFsm::Packet(build_block_read_tracker(borp, w)))
+                    pfsm!(wait / goto ReadBlock::Packet(build_block_read_tracker(borp, w)))
                 } else {
-                    pfsm!(return result OpReadBlockFsm::Error(borp, w))
+                    pfsm!(exit ReadBlock::ServerError(borp, w))
                 },
-            (OpReadBlockFsm::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::Packet(pkt))) =>
-                pfsm!(wait / goto OpReadBlockFsm::Packet(pt.apply(pkt))),
-            (OpReadBlockFsm::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::End)) => {
+            (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::Packet(pkt))) =>
+                pfsm!(wait / goto ReadBlock::Packet(pt.apply(pkt))),
+            (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::End)) => {
                 let (s, re, le, w) = pt.decons();
                 pfsm!(
                     send(DtReq::ClientReadStatus(pb_cons!(ClientReadStatusProto, status: s))) /
-                        goto OpReadBlockFsm::Success(re, le, w))
+                        goto ReadBlock::Success(re, le, w))
             },
-            (s, e) => pfsm!(invalid (e) in (s))
+            //abnormal conditions
+            (s, e) =>
+                pfsm!(exit ReadBlock::OtherError(
+                    app_error!(other "Unexpected s/e {:?}/{:?}", s, e).into(),
+                    s.extract_resources()
+                ))
         }
     }
+}
+
+impl<W> ErrorAccumulator for ReadBlock<W> where W: Write + Send + Debug +'static {
+    fn error(self, e: IoError) -> Self { ReadBlock::OtherError(e, self.extract_resources()) }
 }
 
 
@@ -291,11 +319,11 @@ fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, w: W) -> Block
     BlockReadTracker::new(w, ckalg)
 }
 
-pub fn read_block<'a, W: Write + Send + Debug + 'static>(c: Connection, r: ReadBlockRequest<'a>, w: W)
-                                                         -> BFI<(Result<W>, Connection)> {
-    let fsm = OpReadBlockFsm::new(r, c.client_name(), w);
-    Box::new(c.run(fsm).map(|(c, p)|(p.result(), c))
-    )
+pub fn read_block<W: Write + Send + Debug + 'static>(
+    c: Connection, h: BaseHeaderProto, offset: u64, len: u64, w: W
+) -> BF<((W, Vec<Error>), Connection), ReadBlock<W>> {
+    let fsm = ReadBlock::new(h, offset, len, w);
+    Box::new(c.run(fsm).map(|(c, p)|(p.result(), c)))
 }
 
 
@@ -305,18 +333,6 @@ fn test_read_block_simple() {
 
     //extern crate env_logger;
     //env_logger::init();
-
-
-    /*
-        use bytes::BytesMut;
-        use codec_tools::PduSer;
-        use tokio_io::codec::Encoder;
-        let crsp = pb_cons!(ClientReadStatusProto, status: DtStatus::CHECKSUM_OK);
-        let mut m = BytesMut::new();
-        //crsp.encode(&mut m);
-        codec_tools::encoder::varint_u32().encode(crsp, &mut m);
-        println!("@@@@@ {:?}", CDebug(&m));
-    */
 
     let t = spawn_test_server("127.0.0.1:60010", test_script!{
         //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05
@@ -352,18 +368,27 @@ fn test_read_block_simple() {
     let addr = "127.0.0.1:60010".to_socket_addrs().unwrap().next().ok_or(app_error!(other "DN host not found")).unwrap();
     let conn = Connection::connect(&addr, "abc".to_owned());
 
-    let arg = ReadBlockRequest {
-        pool_id: "BP-1914853243-127.0.0.1-1500467607052",
-        block_id: 1073742835,
-        generation_stamp: 2015,
-        offset: 0,
-        num_bytes: 5
-    };
+    let h = pb_cons!(BaseHeaderProto,
+                    block: pb_cons!(ExtendedBlockProto,
+                        pool_id: "BP-1914853243-127.0.0.1-1500467607052".to_owned(),
+                        block_id: 1073742835,
+                        generation_stamp: 2015,
+                        num_bytes: 5
+                    )
+                );
 
-    let fut = conn.and_then(|c| read_block(c, arg, vec![]));
+    let fsm = ReadBlock::new(h, 0, 5, vec![]);
+
+    let fut =
+        conn.then(|w| match w {
+            Ok(c) => c.run(fsm),
+            Err(e) => b_accumulate(fsm, e)//Box::new(err(fsm.error(e)))
+        });
     let r = fut.wait();
 
-    assert_eq!(r.ok().and_then(|w| w.0.ok()), Some(vec![65, 66, 67, 68, 10]));
+    let (w, errs) = r.map(|(_conn, p)| p.result()).unwrap();
+    assert_eq!(w, vec![65, 66, 67, 68, 10]);
+    assert!(errs.is_empty());
 
     //-----------------------------------
     let _ = t.join().unwrap();
