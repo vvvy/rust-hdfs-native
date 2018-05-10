@@ -330,7 +330,7 @@ impl Get {
         use std::net::{SocketAddr, IpAddr};
         use std::str::FromStr;
         let dnid = pb_decons!(DatanodeInfoProto, dni, id);
-        let (uuid, ip, port) = pb_decons!(DatanodeIDProto, dnid, datanode_uuid, ip_addr, ipc_port);
+        let (uuid, ip, port) = pb_decons!(DatanodeIDProto, dnid, datanode_uuid, ip_addr, xfer_port);
         let ip = IpAddr::from_str(&ip).map_err(|e| app_error!(other "Could not parse DN IP `{}`: `{}`", ip, e) as Error)?;
         let addr = SocketAddr::new(ip, port as u16);
         let bhp = pb_cons!(BaseHeaderProto, block: b, token: t);
@@ -359,7 +359,7 @@ impl ReactorProtocolFsm for Get {
         Self::c_result(self.idle())
     }
 
-    fn complete(mut self, op: GetOperation) -> (Vec<GetOperation>, Self) {
+    fn complete(self, op: GetOperation) -> (Vec<GetOperation>, Self) {
         match op {
             ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(nn::CallW::R(r)) } => {
                 let r = get_block_locations_result(r);

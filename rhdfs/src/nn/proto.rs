@@ -5,7 +5,7 @@ use tokio_tcp::TcpStream;
 //use tokio_core::reactor::Handle;
 use tokio_io::codec::Framed;
 use tokio_io::AsyncRead;
-use futures::{Future, Stream, Poll, Sink};
+use futures::{Future, Stream, Poll, Sink, Async};
 use futures::future::{ok, err};
 
 use *;
@@ -94,6 +94,7 @@ fn validate_response(response_header: &RpcResponseHeaderProto,
 
 impl Connection {
     pub fn connect_det(addr: &SocketAddr, client_id: Vec<u8>, eff_user: String) -> BFI<Connection> {
+        trace!("Trying to connect to {}, client_id={:?}, eff_user={}", addr, client_id, eff_user);
         let rv =
             TcpStream::connect(addr)
                 .map(|c| Connection { io: c.framed(NnCodec::new()), client_id, call_id: 0 })
@@ -158,28 +159,71 @@ impl Connection {
     }
 
     pub fn run<P>(self, p: P) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send + 'static
-    {
-        self.fsm_result(p.start())
+        where P: ProtocolFsm + Send + 'static {
+        Box::new(FsmRunner::new(self, p))
     }
+}
 
-    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send + 'static
-    {
-        match r {
-            ProtocolFsmResult::Send(q) =>
-                Box::new(self
-                    .call(q)
-                    .then(|w| match w {
-                        Ok((r, c)) => c.fsm_result(p.incoming(r)),
-                        Err(e) => Box::new(err(p.error(e)))
-                    })
-                ),
-            ProtocolFsmResult::Exit =>
-                Box::new(ok((self, p))),
+enum FsmRunner<P> {
+    Init(Connection, P),
+    Op(P, BFI<(NnR, Connection)>),
+    Null
+}
+
+type FRR<P> = StdResult<Async<(Connection, P)>, P>;
+
+impl<P> Future for FsmRunner<P>
+    where P: ProtocolFsm + Send +'static {
+    type Item = (Connection, P);
+    type Error = P;
+
+    fn poll(&mut self) -> FRR<P> {
+        #[inline]
+        fn absolutely_not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, None)  }
+
+        #[inline]
+        fn not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, Some(Ok(Async::NotReady)))  }
+
+        #[inline]
+        fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (FsmRunner::Null, Some(v)) }
+
+        fn process_result<P>(c: Connection, (r, p): (ProtocolFsmResult, P)) -> (FsmRunner<P>, Option<FRR<P>>) {
+            match r {
+                ProtocolFsmResult::Send(req) =>
+                    absolutely_not_ready(FsmRunner::Op(p, c.call(req))),
+                ProtocolFsmResult::Exit =>
+                    ready(Ok(Async::Ready((c, p))))
+            }
+        }
+
+        loop {
+            let (s1, rv) = match std::mem::replace(self, FsmRunner::Null) {
+                FsmRunner::Init(c, p) => process_result(c, p.start()),
+                FsmRunner::Op(p, mut rsp_f) => match rsp_f.poll() {
+                    Ok(Async::NotReady) =>
+                        not_ready(FsmRunner::Op(p, rsp_f)),
+                    Ok(Async::Ready((rsp, c))) =>
+                        process_result(c, p.incoming(rsp)),
+                    Err(e) =>
+                        ready(Err(p.error(e)))
+                }
+                FsmRunner::Null =>
+                    panic!("Unfused call to completed FsmRunner"),
+            };
+            *self = s1;
+            if let Some(v) = rv { break v }
         }
     }
 }
+
+impl<P> FsmRunner<P>
+    where P: ProtocolFsm + Send +'static {
+
+    fn new(c: Connection, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
+
+}
+
+
 
 /// Wraps `call` operation into `ProtocolFsm`
 #[derive(Debug)]

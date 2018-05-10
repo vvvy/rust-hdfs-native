@@ -4,7 +4,6 @@ pub use std::error::Error as StdError;
 pub use std::result::Result as StdResult;
 
 use futures::Future;
-use futures::future::err;
 
 pub type FI<T> = Future<Item=T, Error=IoError>;
 pub type BFI<T> = Box<Future<Item=T, Error=IoError> + Send>;

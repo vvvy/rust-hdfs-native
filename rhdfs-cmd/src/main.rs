@@ -28,7 +28,14 @@ fn main() {
 }
 
 fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
-    use std::net::ToSocketAddrs;
+    use std::net::{ToSocketAddrs, SocketAddr};
+
+    fn resolve_hostport(hp: &str) -> Result<SocketAddr> {
+        Ok(hp
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| app_error!(other "Could not resolve host:port in `{}`", hp))?)
+    }
 
     //replace "local" with "127.0.0.1:8020"
     let nn_hostport = match cfg.nn_hostport.as_ref() {
@@ -36,18 +43,22 @@ fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
         r => r
     };
 
-    //resolve namenode host ip
-    let nn = nn_hostport
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| app_error!(other "Could not resolve namenode host in `{}`", cfg.nn_hostport))?;
+    //resolve nat data
+    let mut nat = Vec::new();
+    for (a, b) in cfg.nat {
+        nat.push((resolve_hostport(&a)?, resolve_hostport(&b)?))
+    }
 
-    //TODO: move args to config
+    //resolve namenode host ip
+    let nn = resolve_hostport(nn_hostport)?;
+
+    //TODO: move hardcoded values to config
     let (c, s) =
         create_reactor(
             16,
             std::time::Duration::new(10,0),
             vec![(default_nn_key(), CAddr::NN(nn))],
+            nat,
             SessionData { effective_user: cfg.effective_user.clone()  }
         );
 
@@ -313,6 +324,7 @@ fn parse_command_line() -> (Command, config::Common) {
                         match a0.as_ref() {
                             "-fs" => cfg.nn_hostport = a,
                             "-u" => cfg.effective_user = a,
+                            "--add-nat" => cfg.nat.append(&mut split_arg(a)),
                             _ => error_exit(&format!("Invalid cmd line at `{} {}`", a0, a), "unknown option")
                         };
                         None
@@ -363,6 +375,16 @@ fn convert_arg(v: String) -> Vec<String> {
     } else {
         vec![v]
     }
+}
+
+/// 'n1=v1,n2=v2' -> (n1, v1), (n2, v2)
+fn split_arg(v: String) -> Vec<(String, String)> {
+    v.split(',').into_iter().map(|s| {
+        let mut i = s.split('=').into_iter();
+        let v0 = i.next().unwrap().to_owned();
+        let v1 = i.next().unwrap().to_owned();
+        (v0, v1)
+    }).collect()
 }
 
 /// Prints two-part message to stderr and exits

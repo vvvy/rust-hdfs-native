@@ -29,15 +29,19 @@ pub fn to_vector_of_size<T: Default + Clone>(v: &mut Vec<T>, n: usize) -> () {
 */
 
 
+#[inline]
 pub fn vec_cons<T>(mut v: Vec<T>, t: T) -> Vec<T> {
     v.push(t);
     v
 }
 
+#[inline]
 pub fn vec_cons_opt<T>(mut v: Vec<T>, t: Option<T>) -> Vec<T> {
     t.map(|t| v.push(t));
     v
 }
+
+/*
 pub trait LazyMonoid<T> {
     fn lazy_plus<F>(self, F) -> T where F: FnOnce() -> T;
 }
@@ -50,7 +54,7 @@ impl<T, E> LazyMonoid<Result<Option<T>, E>> for Result<Option<T>, E> {
         }
     }
 }
-
+*/
 
 
 /// Opt-State-Delta-and-Value

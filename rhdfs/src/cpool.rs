@@ -363,7 +363,7 @@ impl<S> Runner<S> {
 
         //let mut s = None;
         //std::mem::swap(&mut self.s, &mut s);
-        let mut s = std::mem::replace(&mut self.s, None);
+        let s = std::mem::replace(&mut self.s, None);
 
         let (r, s) = match s {
             Some(srv) =>
@@ -434,7 +434,7 @@ pub mod test {
         }
     }
 
-    pub type CPS = ConnectionPoolServer<String, String, String, CI, TrivialAgeCheckerFactoryImpl>;
+    //pub type CPS = ConnectionPoolServer<String, String, String, CI, TrivialAgeCheckerFactoryImpl>;
 
     pub struct R { pub s: String }
     impl ErrorAccumulator for R {

@@ -1,5 +1,6 @@
 
 use std::time::Duration;
+use std::collections::HashMap;
 use futures::{Future};
 use futures::future::{ok, err};
 
@@ -96,15 +97,18 @@ pub struct SessionData {
 }
 
 pub struct ConnectorImpl {
+    nat: HashMap<SocketAddr, SocketAddr>,
     session_data: SessionData,
     connector_id: u64,
     connection_n: usize
 }
 
 impl ConnectorImpl {
-    fn new(session_data: SessionData) -> ConnectorImpl {
+    fn new(session_data: SessionData, init_nat: Vec<(SocketAddr, SocketAddr)>) -> ConnectorImpl {
         let connector_id = rand::random();
-        ConnectorImpl { session_data, connector_id, connection_n: 0 }
+        let mut nat = HashMap::new();
+        for (k, v) in init_nat { nat.insert(k, v); }
+        ConnectorImpl { nat, session_data, connector_id, connection_n: 0 }
     }
     fn next_client_name(&mut self) -> String {
         //org.apache.hadoop.hdfs.DFSClient.DFSClient:
@@ -115,16 +119,28 @@ impl ConnectorImpl {
         self.connection_n += 1;
         rv
     }
-}
 
+    #[inline]
+    fn translate<'a>(&'a self, a: &'a SocketAddr) -> &'a SocketAddr {
+        self.nat.get(a).unwrap_or(a)
+    }
+}
 
 impl Connector<CAddr, ReactorConnection> for ConnectorImpl {
     fn connect(&mut self, a: CAddr) -> BFI<ReactorConnection> {
         match a {
             CAddr::NN(addr) =>
-                Box::new(nn::Connection::connect(&addr, self.session_data.effective_user.clone()).map(|c| ReactorConnection::NN(c))),
-            CAddr::DT(addr) =>
-                Box::new(dt::Connection::connect(&addr, self.next_client_name()).map(|c| ReactorConnection::DT(c)))
+                Box::new(nn::Connection::connect(
+                    self.translate(&addr),
+                    self.session_data.effective_user.clone()
+                ).map(|c| ReactorConnection::NN(c))),
+            CAddr::DT(addr) => {
+                let cname = self.next_client_name();
+                Box::new(dt::Connection::connect(
+                    self.translate(&addr),
+                    cname,
+                ).map(|c| ReactorConnection::DT(c)))
+            }
         }
     }
 }
@@ -138,9 +154,18 @@ pub type ReactorServer = ConnectionPoolServer<
 /// Arguments are server receiver buffer size and maximum connection age. The maximum connection
 /// age corresponds to `ipc.client.connection.maxidletime` Hadoop setting (defaults to 10s).
 /// This should not exceed the actual value configured in the cluster.
-pub fn create_reactor(buffer_size: usize, max_age: Duration, init_a: Vec<(CKey, CAddr)>, session_data: SessionData) -> (ReactorClient, BFI<ReactorServer>) {
+pub fn create_reactor(
+    buffer_size: usize,
+    max_age: Duration,
+    init_a: Vec<(CKey, CAddr)>,
+    init_nat: Vec<(SocketAddr, SocketAddr)>,
+    session_data: SessionData) -> (ReactorClient, BFI<ReactorServer>) {
     let (c, s) =
-        create_connection_pool(ConnectorImpl::new(session_data), AgeCheckerFactoryImpl::new(max_age), buffer_size, init_a);
+        create_connection_pool(
+            ConnectorImpl::new(session_data ,init_nat),
+            AgeCheckerFactoryImpl::new(max_age),
+            buffer_size,
+            init_a);
     (ReactorClient { pool: c }, s)
 }
 
@@ -149,6 +174,7 @@ pub const DEFAULT_NN_KEY: &'static str = "*";
 pub fn default_nn_key() -> CKey { CKey::NN(DEFAULT_NN_KEY.to_owned()) }
 
 impl ReactorClient {
+    //TODO as recursive (chained) Future::then/and_then is stack-unsafe, rewrite run using a singe compound FsmRunner like in dt/proto.rs
     #[inline]
     pub fn run<P>(self, p: P)-> BFTT<P>  where
         P: ReactorProtocolFsm + Send + 'static,
@@ -234,6 +260,7 @@ impl ReactorClient {
             }
         }
     }
+
 
     fn fsm_start<P>(self, p: P)-> BFTT<P>  where
         P: ReactorProtocolFsm + Send + 'static,

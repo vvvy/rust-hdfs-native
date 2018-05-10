@@ -4,13 +4,14 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::fmt::Debug;
 
-use futures::{Future, Stream, Poll, Sink};
+use futures::{Future, Stream, Poll, Sink, Async};
 use futures::future::{ok, err};
 
 use tokio_io::AsyncRead;
 use tokio_io::codec::Framed;
 use tokio_tcp::TcpStream;
 
+pub use log::Level::Trace as LogTrace;
 use super::codec::{DtCodec, DtReq, DtRsp};
 use *;
 
@@ -48,7 +49,7 @@ macro_rules! pfsm {
     {exit $s:expr} => { (ProtocolFsmResult::Exit, $s) };
 }
 
-pub use log::Level::Trace as LogTrace;
+
 
 #[macro_export]
 macro_rules! pfsm_trace {
@@ -74,6 +75,7 @@ pub trait ProtocolFsm : Debug + ErrorAccumulator {
 
 impl Connection {
     pub fn connect(addr: &SocketAddr, client_name: String) -> BFI<Connection> {
+        trace!("Trying to connect to {}, client_name={}", addr, client_name);
         let rv =
             TcpStream::connect(addr)
                 .map(|c| Connection { io: c.framed(DtCodec::new()), client_name });
@@ -105,23 +107,6 @@ impl Connection {
         Box::new(rv)
     }
 
-    /*
-    fn get_resp_recur<P>(self, mut p: P) -> Box<Future<Item=(Connection, P), Error=(IoError, Connection)> + Send>
-        where P: FnMut(DtRsp) -> IoResult<bool> + Send + 'static{
-        let rv =
-            self.into_future().and_then(|(orsp, c)|
-                match orsp {
-                    Some(r) => match p(r) {
-                        Ok(true) => c.get_resp_recur(p),
-                        Ok(false) => Box::new(ok((c, p))),
-                        Err(e) => Box::new(err((e, c)))
-                    },
-                    None => Box::new(err((Connection::broken_pipe_error(), c)))
-                }
-            );
-        Box::new(rv)
-    }
-*/
     #[inline]
     fn call(self, request: DtReq) -> BFI<(DtRsp, Connection)> {
         Box::new(self.send_req(request).and_then(|c| c.get_resp()))
@@ -130,52 +115,79 @@ impl Connection {
     #[inline]
     pub fn run<P>(self, p: P) -> BF<(Connection, P), P>
         where P: ProtocolFsm + Send +'static {
-        self.fsm_idle(p)
-    }
-
-    #[inline]
-    fn fsm_idle<P>(self, p: P) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send +'static {
-        self.fsm_result(pfsm_trace!(p, "<idle>", p.idle()))
-    }
-
-    #[inline]
-    fn fsm_incoming<P>(self, p: P, rsp: DtRsp) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send +'static {
-        self.fsm_result(pfsm_trace!(p, rsp, p.incoming(rsp)))
-    }
-
-    fn fsm_result<P>(self, (r, p): (ProtocolFsmResult, P)) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send +'static {
-        match r {
-            ProtocolFsmResult::Send(req) =>
-                Box::new(self
-                             .send_req(req)
-                             .then(|w| match w {
-                                 Ok(c) => c.fsm_idle(p),
-                                 Err(e) => Box::new(err(p.error(e)))
-                             })
-                ),
-            ProtocolFsmResult::Wait =>
-                self.fsm_wait(p),
-            ProtocolFsmResult::Exit =>
-                Box::new(ok((self, p)))
-        }
-    }
-
-    fn fsm_wait<P>(self, p: P) -> BF<(Connection, P), P>
-        where P: ProtocolFsm + Send +'static {
-        let rv =
-            self
-                .into_future()
-                .then(|w| match w {
-                    Ok((or, c)) => match or {
-                        Some(r) => c.fsm_incoming(p, r),
-                        None => Box::new(err(p.error(Connection::broken_pipe_error())))
-                    }
-                    Err((e, _c)) => Box::new(err(p.error(e)))
-                });
-        Box::new(rv)
+        Box::new(FsmRunner::new(self, p))
     }
 }
 
+enum FsmRunner<P> {
+    Init(Connection, P),
+    Send(P, BFI<Connection>),
+    Wait(P, BFI<(DtRsp, Connection)>),
+    Null
+}
+
+type FRR<P> = StdResult<Async<(Connection, P)>, P>;
+
+impl<P> Future for FsmRunner<P>
+    where P: ProtocolFsm + Send +'static {
+    type Item = (Connection, P);
+    type Error = P;
+
+    fn poll(&mut self) -> FRR<P> {
+        #[inline]
+        fn absolutely_not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, None)  }
+
+        #[inline]
+        fn not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, Some(Ok(Async::NotReady)))  }
+
+        #[inline]
+        fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (FsmRunner::Null, Some(v)) }
+
+        fn process_result<P>(c: Connection, (r, p): (ProtocolFsmResult, P)) -> (FsmRunner<P>, Option<FRR<P>>) {
+            match r {
+                ProtocolFsmResult::Send(req) =>
+                    absolutely_not_ready(FsmRunner::Send(p, c.send_req(req))),
+                ProtocolFsmResult::Wait =>
+                    absolutely_not_ready(FsmRunner::Wait(p, c.get_resp())),
+                ProtocolFsmResult::Exit =>
+                    ready(Ok(Async::Ready((c, p))))
+            }
+        }
+
+        loop {
+            let (s1, rv) = match std::mem::replace(self, FsmRunner::Null) {
+                FsmRunner::Init(c, p) => process_result(c, p.idle()),
+                FsmRunner::Send(p, mut conn_f) => match conn_f.poll() {
+                    Ok(Async::NotReady) =>
+                        not_ready(FsmRunner::Send(p, conn_f)),
+                    Ok(Async::Ready(c)) =>
+                        process_result(c, p.idle()),
+                    Err(e) =>
+                        ready(Err(p.error(e)))
+                }
+                FsmRunner::Wait(p, mut rsp_f) => match rsp_f.poll() {
+                    Ok(Async::NotReady) =>
+                        not_ready(FsmRunner::Wait(p, rsp_f)),
+                    Ok(Async::Ready((rsp, c))) =>
+                        process_result(c, p.incoming(rsp)),
+                    Err(e) =>
+                        ready(Err(p.error(e)))
+                }
+                FsmRunner::Null =>
+                    panic!("Unfused call to completed FsmRunner"),
+            };
+            *self = s1;
+            if let Some(v) = rv { break v }
+        }
+    }
+}
+//type Rules = ~[Prod<T,NT>];
+
+
+
+impl<P> FsmRunner<P>
+    where P: ProtocolFsm + Send +'static {
+
+    fn new(c: Connection, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
+
+}

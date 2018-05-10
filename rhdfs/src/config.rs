@@ -2,14 +2,16 @@
 
 pub struct Common {
     pub nn_hostport: String,
-    pub effective_user: String
+    pub effective_user: String,
+    pub nat: Vec<(String, String)>
 }
 
 impl Default for Common {
     fn default() -> Self {
         Common {
             nn_hostport: "local".to_owned(),
-            effective_user: "cloudera".to_owned()
+            effective_user: "cloudera".to_owned(),
+            nat: vec![]
         }
     }
 }
