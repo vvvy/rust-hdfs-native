@@ -1,14 +1,15 @@
 
 use std::time::Duration;
 use std::collections::HashMap;
-use futures::{Future};
+use std::net::{SocketAddr};
+
+use futures::{Future, Async};
 use futures::future::{ok, err};
 
 use nn;
 use dt;
 use cpool::*;
 use *;
-use std::net::{SocketAddr};
 
 /// Connection key. For a DT, the string is a UUID of the DN. For a NN, the string is either `*`,
 /// if no HA is configured, or NN's id otherwise
@@ -72,8 +73,6 @@ pub trait ReactorProtocolFsm where Self: Sized {
 
 /// Future of `ReactorOperation`
 type ReactorOpF<FN, FD> = BFTT<ReactorOperation<FN, FD>>;
-
-type BSF<P: ReactorProtocolFsm> = BFTT<((ReactorOperation<P::FN, P::FD>, usize, Vec<ReactorOpF<P::FN, P::FD>>), P)>;
 
 pub enum ReactorConnection {
     NN(nn::Connection),
@@ -174,13 +173,12 @@ pub const DEFAULT_NN_KEY: &'static str = "*";
 pub fn default_nn_key() -> CKey { CKey::NN(DEFAULT_NN_KEY.to_owned()) }
 
 impl ReactorClient {
-    //TODO as recursive (chained) Future::then/and_then is stack-unsafe, rewrite run using a singe compound FsmRunner like in dt/proto.rs
     #[inline]
-    pub fn run<P>(self, p: P)-> BFTT<P>  where
+    pub fn run<P>(self, p: P)-> BFT<(Self, P)>  where
         P: ReactorProtocolFsm + Send + 'static,
         P::FN: nn::ProtocolFsm + Send + 'static,
         P::FD: dt::ProtocolFsm + Send + 'static {
-        self.fsm_start(p)
+        Box::new(FsmRunner::new(self, p))
     }
 
     fn conn_type_error() -> IoError {
@@ -260,49 +258,85 @@ impl ReactorClient {
             }
         }
     }
+}
+
+type SelectAllBF<FN, FD> =  BF<
+    (ReactorOperation<FN, FD>, usize, Vec<ReactorOpF<FN, FD>>),
+    (ReactorOperation<FN, FD>, usize, Vec<ReactorOpF<FN, FD>>)
+>;
 
 
-    fn fsm_start<P>(self, p: P)-> BFTT<P>  where
-        P: ReactorProtocolFsm + Send + 'static,
-        P::FN: nn::ProtocolFsm + Send + 'static,
-        P::FD: dt::ProtocolFsm + Send + 'static {
-        let (y, p) = p.start(); //match p.start() { Ok(v) => v, Err(e) => return Box::new(err(e)) };
-        let ops = y.into_iter().map(|op| self.exec_op(op)).collect();
-        self.fsm_launch(p, ops)
-    }
 
-    /// Recurring `ReactorProtocolFsm` evaluation step
-    fn fsm_step<P>(self, f: BSF<P>) -> BFTT<P> where
-        P: ReactorProtocolFsm + Send + 'static,
-        P::FN: nn::ProtocolFsm + Send + 'static,
-        P::FD: dt::ProtocolFsm + Send + 'static {
+enum FsmRunner<P> where P: ReactorProtocolFsm + Send + 'static {
+    Init(ReactorClient, P),
+    Many(ReactorClient, P, SelectAllBF<P::FN, P::FD>),
+    Null
+}
 
-        Box::new(f.then(|w| {
-            let ((y, p), mut ops) = match w {
-                Ok(((r, _, ops), p)) => (p.complete(r), ops),
-                Err(((r, _, ops), p)) => (p.error(r), ops)
+type FRR<P> = StdResult<Async<(ReactorClient, P)>, ()>;
+
+impl<P> Future for FsmRunner<P> where
+    P: ReactorProtocolFsm + Send + 'static,
+    P::FN: nn::ProtocolFsm + Send + 'static,
+    P::FD: dt::ProtocolFsm + Send + 'static {
+    type Item = (ReactorClient, P);
+    type Error = ();
+
+    fn poll(&mut self) -> FRR<P> {
+        #[inline]
+        fn absolutely_not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) where
+            P: ReactorProtocolFsm + Send + 'static { (s, None)  }
+
+        #[inline]
+        fn not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) where
+            P: ReactorProtocolFsm + Send + 'static { (s, Some(Ok(Async::NotReady)))  }
+
+        #[inline]
+        fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) where
+            P: ReactorProtocolFsm + Send + 'static { (FsmRunner::Null, Some(v)) }
+
+        fn process_result<P>(c: ReactorClient, (r, p): (ReactorOpVec<P::FN, P::FD>, P), rest: Vec<ReactorOpF<P::FN, P::FD>>) -> (FsmRunner<P>, Option<FRR<P>>) where
+            P: ReactorProtocolFsm + Send + 'static,
+            P::FN: nn::ProtocolFsm + Send + 'static,
+            P::FD: dt::ProtocolFsm + Send + 'static {
+            let ops = vec_plus(rest, r.into_iter().map(|op| c.exec_op(op)).collect());
+            if ops.is_empty() {
+                ready(Ok(Async::Ready((c, p))))
+            } else {
+                //TODO: specially handle ops.len() == 1 via `FsmRunner::One(ReactorClient, P, ReactorOpF<FN, FD>)`
+                absolutely_not_ready(FsmRunner::Many(c,p, Box::new(futures::future::select_all(ops))))
+            }
+        }
+
+        loop {
+            let (s1, rv) = match std::mem::replace(self, FsmRunner::Null) {
+                FsmRunner::Init(c, p) => process_result(c, p.start(), vec![]),
+                FsmRunner::Many(c, p, mut f) => match f.poll() {
+                    Ok(Async::NotReady) =>
+                        not_ready(FsmRunner::Many(c, p, f)),
+                    Ok(Async::Ready((completed, _offset, rest))) =>
+                        process_result(c, p.complete(completed), rest),
+                    Err((in_error, _offset, rest)) =>
+                        process_result(c, p.error(in_error), rest)
+                }
+                FsmRunner::Null =>
+                    panic!("Unfused call to completed FsmRunner")
             };
-            let mut z = y.into_iter().map(|op| self.exec_op(op)).collect();
-            ops.append(&mut z);
-            self.fsm_launch(p, ops)
-        }))
-    }
-
-    fn fsm_launch<P>(self, p: P, ops: Vec<ReactorOpF<P::FN, P::FD>>) -> BFTT<P> where
-        P: ReactorProtocolFsm + Send + 'static,
-        P::FN: nn::ProtocolFsm + Send + 'static,
-        P::FD: dt::ProtocolFsm + Send + 'static {
-        if ops.is_empty() {
-            Box::new(ok(p))
-        } else {
-            let bf = bimap(
-                futures::future::select_all(ops),
-                |rix| (rix, p)
-            );
-            self.fsm_step(bf)
+            *self = s1;
+            if let Some(v) = rv { break v }
         }
     }
 }
+
+impl<P> FsmRunner<P> where
+    P: ReactorProtocolFsm + Send + 'static,
+    P::FN: nn::ProtocolFsm + Send + 'static,
+    P::FD: dt::ProtocolFsm + Send + 'static {
+
+    fn new(c: ReactorClient, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
+
+}
+
 
 pub type ReactorRunner = Runner<ReactorServer>;
 

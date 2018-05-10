@@ -68,7 +68,7 @@ fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
         Command::GetListing(args) =>
             get_listing(&mut rr, &c, args),
         Command::Get(args) =>
-            get(&mut rr, &c, args),
+            get(&mut rr, c, args),
         Command::Version =>
             version(),
         Command::Help|Command::Null =>
@@ -215,7 +215,7 @@ fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
 }
 
 
-fn get(r: &mut ReactorRunner, c: &ReactorClient, args: args::Get) -> Result<()> {
+fn get(r: &mut ReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<()> {
     use std::fs::File;
 
     let copy_vec = build_copy_list(args.fs)?;
@@ -224,7 +224,8 @@ fn get(r: &mut ReactorRunner, c: &ReactorClient, args: args::Get) -> Result<()> 
     for (src, dst) in copy_vec {
         debug!("Copying {} -> {}", src, dst.display());
         let of = File::create(dst)?;
-        let (errs, get) = r.exec_x(hdfs::get(c, src, of));
+        let (c1, (errs, get)) = r.exec_pair(hdfs::get(c, src, of));
+        c = c1;
         debug!("get result: {:?} {:?}", errs, get);
         let _ = result_from_errors(errs)?;
     }

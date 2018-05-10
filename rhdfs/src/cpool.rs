@@ -355,14 +355,10 @@ pub struct Runner<S> {
 impl<S> Runner<S> {
     pub fn new(s: BFI<S>) -> Runner<S> { Runner { s: Some(s) } }
 
-    /// returns a success indicator and a payload. The success indicator is true if
-    /// the payload arrived on the Ok channel.
-    pub fn exec_r<R>(&mut self, rf: BFTT<R>) -> StdResult<R, R> where
-    R: ErrorAccumulator {
+    /// executes `rf` synchronously.
+    pub fn exec_r<R, U>(&mut self, rf: BF<R, U>) -> StdResult<R, U> {
         use futures::future::Either;
 
-        //let mut s = None;
-        //std::mem::swap(&mut self.s, &mut s);
         let s = std::mem::replace(&mut self.s, None);
 
         let (r, s) = match s {
@@ -386,15 +382,26 @@ impl<S> Runner<S> {
     ///exec and unwrap
     #[inline]
     #[cfg(test)]
-    pub fn exec_u<R>(&mut self, rf: BFTT<R>) -> (bool, R) where R: ErrorAccumulator {
+    pub fn exec_u<R>(&mut self, rf: BFTT<R>) -> (bool, R) {
         biunwrap(self.exec_r(rf))
     }
 
     ///exec and extract errors
     #[inline]
-    pub fn exec_x<R>(&mut self, rf: BFTT<R>) -> (Vec<IoError>, R) where R: ErrorAccumulator + ErrorExtractor {
+    pub fn exec_x<R>(&mut self, rf: BFTT<R>) -> (Vec<IoError>, R) where R: ErrorExtractor {
         ErrorExtractor::from_result(self.exec_r(rf))
     }
+
+    ///exec_y
+    #[inline]
+    pub fn exec_pair<C, R>(&mut self, rf: BFT<(C, R)>) -> (C, (Vec<IoError>, R)) where R: ErrorExtractor {
+        match self.exec_r(rf) {
+            Ok((c, r)) => (c, ErrorExtractor::extract_errors(r)),
+            Err(()) => panic!("Unexpected future output on Error channel")
+        }
+    }
+
+
 }
 
 #[cfg(test)]

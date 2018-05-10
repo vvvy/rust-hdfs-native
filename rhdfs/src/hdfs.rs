@@ -402,8 +402,8 @@ impl ErrorExtractor for Get {
     }
 }
 
-pub fn get(rc: &ReactorClient, src: String, dst: File) -> BFTT<Get> {
-     rc.clone().run(Get::new(src, dst))
+pub fn get(rc: ReactorClient, src: String, dst: File) -> BFT<(ReactorClient, Get)> {
+     rc.run(Get::new(src, dst))
 }
 
 

@@ -41,6 +41,13 @@ pub fn vec_cons_opt<T>(mut v: Vec<T>, t: Option<T>) -> Vec<T> {
     v
 }
 
+#[inline]
+pub fn vec_plus<T>(mut v: Vec<T>, mut t: Vec<T>) -> Vec<T> {
+    v.append(&mut t);
+    v
+}
+
+
 /*
 pub trait LazyMonoid<T> {
     fn lazy_plus<F>(self, F) -> T where F: FnOnce() -> T;
