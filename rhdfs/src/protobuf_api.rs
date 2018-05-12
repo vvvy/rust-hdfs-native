@@ -93,6 +93,8 @@ pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
     GetListingResponseProto,
     GetBlockLocationsRequestProto,
     GetBlockLocationsResponseProto,
+    CreateRequestProto,
+    CreateResponseProto,
     AddBlockRequestProto,
     AddBlockResponseProto
 };
@@ -137,6 +139,19 @@ macro_rules! pbdb {
 
 { GetBlockLocationsResponseProto, locations, $a:tt }=> { pbdbf!{ take_locations, set_locations, $a } };
 
+// (src, masked, client_name, create_flag, create_parent, replication, block_size, crypto_protocol_version)
+{ CreateRequestProto, src, $a:tt }=> { pbdbf!{ get_src, set_src, $a } };
+{ CreateRequestProto, masked, $a:tt }=> { pbdbf!{ get_masked, set_masked, $a } };
+{ CreateRequestProto, client_name, $a:tt }=> { pbdbf!{ get_clientName, set_clientName, $a } };
+{ CreateRequestProto, create_flag, $a:tt }=> { pbdbf!{ get_createFlag, set_createFlag, $a } };
+{ CreateRequestProto, create_parent, $a:tt }=> { pbdbf!{ get_createParent, set_createParent, $a } };
+{ CreateRequestProto, replication, $a:tt }=> { pbdbf!{ get_replication, set_replication, $a } };
+{ CreateRequestProto, block_size, $a:tt }=> { pbdbf!{ get_blockSize, set_blockSize, $a } };
+{ CreateRequestProto, crypto_protocol_version, $a:tt }=> { pbdbf!{ get_cryptoProtocolVersion, set_cryptoProtocolVersion, $a } };
+
+// (fs)
+{ CreateResponseProto, fs, $a:tt }=> { pbdbf!{ get_fs, set_fs, $a } };
+
 // (src, client_name, previous, exclude_nodes, file_id, favored_nodes)
 { AddBlockRequestProto, src, $a:tt }=> { pbdbf!{ get_src, set_src, $a } };
 { AddBlockRequestProto, client_name, $a:tt }=> { pbdbf!{ get_clientName, set_clientName, $a } };
@@ -145,8 +160,10 @@ macro_rules! pbdb {
 { AddBlockRequestProto, file_id, $a:tt }=> { pbdbf!{ get_fileId, set_fileId, $a } };
 { AddBlockRequestProto, favored_nodes, $a:tt }=> { pbdbf!{ get_favoredNodes, set_favoredNodes, $a } };
 
+// (block)
 { AddBlockResponseProto, block, $a:tt }=> { pbdbf!{ get_block, set_block, $a } };
 
+//----------------------------------------------------------------------------------------------------------------------
 //hdfs.proto
 { DirectoryListingProto, partial_listing, $a:tt } => { pbdbf!{ get_partialListing, set_partialListing, $a } };
 { DirectoryListingProto, remaining_entries, $a:tt } => { pbdbf!{ get_remainingEntries, set_remainingEntries, $a } };

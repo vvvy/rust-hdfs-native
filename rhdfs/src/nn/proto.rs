@@ -257,16 +257,8 @@ impl ProtocolFsm for CallW {
     }
 }
 
-//impl ErrorAccumulator for CallW {
-//    fn error(self, e: IoError) -> Self { CallW::Err(e) }
-//}
-
-
 fn get_method_name(q: &NnQ) -> String {
-    match q {
-        &NnQ::GetListing(..) => "getListing".to_owned(),
-        &NnQ::GetBlockLocations(..) => "getBlockLocations".to_owned()
-    }
+    super::codec::get_method_name(q)
 }
 
 

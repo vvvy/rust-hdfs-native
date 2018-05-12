@@ -253,38 +253,130 @@ impl<MR, R> Decoder for RpcDecoder<MR, R> where MR: PduDes + Debug, R: Debug {
 
 //--------------------------------------------------------------------------------------------------
 
+macro_rules! nn_codec {
+    { $($i:ident ( $nme:expr ) << $req:ident >> $rsp:ident;)+ } => {
+        #[derive(Debug)]
+        pub enum NnQ { $( $i($req) ),+ }
+        #[derive(Debug)]
+        pub enum NnR { $( $i($rsp) ),+ }
+
+        impl PduSer for NnQ {
+            fn serialized_len(&mut self) -> usize {
+                match self {
+                    $( &mut NnQ::$i(ref mut m) => m.serialized_len() ),+
+                }
+            }
+
+            fn encode(self, b: &mut BytesMut) -> Result<()> {
+                match self {
+                    $( NnQ::$i(m) => m.encode(b) ),+
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        pub enum NnS {
+            $( $i(RpcDecoder<$rsp, NnR>) ),+
+        }
+
+        impl Decoder for NnS {
+            type Item = RpcRsp<NnR>;
+            type Error = Error;
+
+            fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
+                match self {
+                    $( &mut NnS::$i(ref mut p) => p.decode(src) ),+
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        pub struct NnCodecA;
+        impl RpcCodecA for NnCodecA {
+            type Q = NnQ;
+            type R = NnR;
+            type S = NnS;
+
+            fn state<'a>(req: &NnQ) -> NnS {
+                match req {
+                    $( &NnQ::$i(..) => NnS::$i(RpcDecoder::new(|o| NnR::$i(o))) ),+
+                }
+            }
+        }
+
+        pub fn get_method_name(q: &NnQ) -> String {
+            match q {
+                $( &NnQ::$i(..) => $nme.to_owned() ),+
+            }
+        }
+    };
+}
+
+nn_codec! {
+    GetListing("getListing")
+        << GetListingRequestProto
+        >> GetListingResponseProto
+        ;
+    GetBlockLocations("getBlockLocations")
+        << GetBlockLocationsRequestProto
+        >> GetBlockLocationsResponseProto
+        ;
+    Create("create")
+        << CreateRequestProto
+        >> CreateResponseProto
+        ;
+    AddBlock("addBlock")
+        << AddBlockRequestProto
+        >> AddBlockResponseProto
+    ;
+}
+
+/*
 #[derive(Debug)]
 pub enum NnQ {
     GetListing(GetListingRequestProto),
-    GetBlockLocations(GetBlockLocationsRequestProto)
+    GetBlockLocations(GetBlockLocationsRequestProto),
+    Create(CreateRequestProto),
+    AddBlock(AddBlockRequestProto)
 }
+
+#[derive(Debug)]
+pub enum NnR {
+    GetListing(GetListingResponseProto),
+    GetBlockLocations(GetBlockLocationsResponseProto),
+    Create(CreateResponseProto),
+    AddBlock(AddBlockResponseProto)
+}
+
 
 impl PduSer for NnQ {
     fn serialized_len(&mut self) -> usize {
         match self {
             &mut NnQ::GetListing(ref mut m) => m.serialized_len(),
-            &mut NnQ::GetBlockLocations(ref mut m) => m.serialized_len()
+            &mut NnQ::GetBlockLocations(ref mut m) => m.serialized_len(),
+            &mut NnQ::Create(ref mut m) => m.serialized_len(),
+            &mut NnQ::AddBlock(ref mut m) => m.serialized_len()
         }
     }
 
     fn encode(self, b: &mut BytesMut) -> Result<()> {
         match self {
             NnQ::GetListing(m) => m.encode(b),
-            NnQ::GetBlockLocations(m) => m.encode(b)
+            NnQ::GetBlockLocations(m) => m.encode(b),
+            NnQ::Create(m) => m.encode(b),
+            NnQ::AddBlock(m) => m.encode(b)
         }
     }
 }
 
-#[derive(Debug)]
-pub enum NnR {
-    GetListing(GetListingResponseProto),
-    GetBlockLocations(GetBlockLocationsResponseProto)
-}
+
 
 #[derive(Debug)]
 pub enum NnS {
     GetListing(RpcDecoder<GetListingResponseProto, NnR>),
-    GetBlockLocations(RpcDecoder<GetBlockLocationsResponseProto, NnR>)
+    GetBlockLocations(RpcDecoder<GetBlockLocationsResponseProto, NnR>),
+    Create(RpcDecoder<CreateResponseProto, NnR>),
+    AddBlock(RpcDecoder<AddBlockResponseProto, NnR>)
 }
 
 impl Decoder for NnS {
@@ -294,7 +386,10 @@ impl Decoder for NnS {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         match self {
             &mut NnS::GetListing(ref mut p) => p.decode(src),
-            &mut NnS::GetBlockLocations(ref mut p) => p.decode(src)
+            &mut NnS::GetBlockLocations(ref mut p) => p.decode(src),
+            &mut NnS::Create(ref mut p) => p.decode(src),
+            &mut NnS::AddBlock(ref mut p) => p.decode(src)
+
         }
     }
 }
@@ -310,11 +405,22 @@ impl RpcCodecA for NnCodecA {
     fn state<'a>(req: &NnQ) -> NnS {
         match req {
             &NnQ::GetListing(..) => NnS::GetListing(RpcDecoder::new(|o| NnR::GetListing(o))),
-            &NnQ::GetBlockLocations(..) => NnS::GetBlockLocations(RpcDecoder::new(|o| NnR::GetBlockLocations(o)))
+            &NnQ::GetBlockLocations(..) => NnS::GetBlockLocations(RpcDecoder::new(|o| NnR::GetBlockLocations(o))),
+            &NnQ::Create(..) => NnS::Create(RpcDecoder::new(|o| NnR::Create(o))),
+            &NnQ::AddBlock(..) => NnS::AddBlock(RpcDecoder::new(|o| NnR::AddBlock(o))),
         }
     }
 }
 
+pub fn get_method_name(q: &NnQ) -> String {
+    match q {
+        &NnQ::GetListing(..) => "getListing".to_owned(),
+        &NnQ::GetBlockLocations(..) => "getBlockLocations".to_owned(),
+        &NnQ::Create(..) => "create".to_owned(),
+        &NnQ::AddBlock(..) => "addBlock".to_owned()
+    }
+}
+*/
 pub type NnCodec = RpcCodec<NnCodecA>;
 
 
