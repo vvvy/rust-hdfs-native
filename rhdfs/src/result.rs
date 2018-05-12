@@ -14,16 +14,15 @@ impl<T, E> ErrorConverter<StdResult<T, E>> for Result<T> where E: From<Error> {
     }
 }
 
-pub fn result_from_errors<E: Into<Error> + std::fmt::Display>(mut errs: Vec<E>) -> Result<()> {
-    let e = errs.pop();
-    e.map_or(
-        Ok(()),
-        |e| Err(
-            if errs.is_empty() {
-                e.into()
-            } else {
-                app_error!(other "Multiple errors found, the last is: {}", e)
-            }
-        )
-    )
+pub trait Commute<T> {
+    fn commute(self) -> (T, Result<()>);
+}
+
+impl<T> Commute<T> for StdResult<T, (Error, T)> {
+    fn commute(self) -> (T, Result<()>) {
+        match self {
+            Ok(t) => (t, Ok(())),
+            Err((e, t)) => (t, Err(e))
+        }
+    }
 }

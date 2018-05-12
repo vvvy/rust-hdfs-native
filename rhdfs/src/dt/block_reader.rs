@@ -3,7 +3,6 @@ use std::io::Write;
 use std::fmt;
 use std::fmt::Debug;
 
-use futures::{Future};
 use byteorder::{ByteOrder, BigEndian};
 use crc::crc32;
 
@@ -18,6 +17,7 @@ use *;
 trait ChecksumValidator: Send + Debug {
     fn is_trivial(&self) -> bool;
     fn is_checksum_ok(&self, data: &[u8], sums: &[u8]) -> bool;
+    //fn eval(&self, data: &[u8], sums: &mut [u8]);
 }
 
 #[derive(Debug)]
@@ -28,6 +28,7 @@ impl ChecksumValidator for CVTrivial {
     fn is_checksum_ok(&self, _data: &[u8], _sums: &[u8]) -> bool {
         true
     }
+    //fn eval(&self, data: &[u8], sums: &mut [u8]) { }
 }
 
 struct CVCRC32 {
@@ -53,6 +54,10 @@ impl ChecksumValidator for CVCRC32 {
             .find(|&(d, s)| (self.algo)(d) != BigEndian::read_u32(s))
             .is_none()
     }
+    /*fn eval(&self, data: &[u8], sums: &mut [u8]) {
+        let idata = data.chunks(self.bytes_per_checksum);
+        let b = BytesMut::f
+    }*/
 }
 
 impl CVCRC32 {
@@ -65,19 +70,44 @@ impl CVCRC32 {
 }
 
 //--------------------------------------------------------------------------------------------------
+//TODO: error handling
+// Error value in the case of an error should indicate either recoverable or irrecoverable error
+// Any local (W-related) error is irrecoverable.
+// Remote (DN-related) errors can typically be fixed by switching to the next DN in the chain, so
+// they are recoverable.
+// When a failed BRT object is returned, its offset field should correctly indicate the number of bytes
+// successfully read, so the read of the next DN starts at this point.
+// (NEEDS ENHANCEMENT) Remote errors must terminate the DN connection early (???).
+// Some remote errors (e g failed CRC) must lead to the DN being included in the failed DN list (???).
+// All remote errors raised in BRT are permanent (???)
+
+
+/// State of block reader
+#[derive(Debug)]
+pub struct BlockReadState<W: Write> {
+    pub w: W,
+    ///Read position inside the block: the position read so far, not including any bad data
+    pub read_position: i64
+}
+
+
+impl<W: Write> BlockReadState<W> {
+    fn new(w: W, read_position: i64) -> BlockReadState<W> {
+        BlockReadState { w, read_position }
+    }
+
+}
+
 
 /// A tracking structure for OpBlockRead.
-/// NOTE: Presumably, this implementation has error handling semantics different from
-/// `org.apache.hadoop.hdfs.RemoteBlockReader2`:
-/// * The latter throws and (presumably) aborts immediately upon any error, checksum or sequencing.
-/// * We try to read until the end (which may be incorrect)
+/// This implementation fails fast on any error, aborting the DN connection
+/// See `org.apache.hadoop.hdfs.RemoteBlockReader2`.
+
 pub struct BlockReadTracker<W: Write> {
     w: W,
     c: Box<ChecksumValidator>,
     seqno: i64,
-    offset: i64,
-    remote_error: Option<Error>,
-    local_error: Option<Error>
+    offset: i64
 }
 
 impl<W: Write> Debug for BlockReadTracker<W> {
@@ -86,21 +116,18 @@ impl<W: Write> Debug for BlockReadTracker<W> {
             .field("c", &self.c)
             .field("seqno", &self.seqno)
             .field("offset", &self.offset)
-            .field("remote_error", &self.remote_error)
-            .field("local_error", &self.local_error)
             .finish()
     }
 }
 
 
 impl<W: Write> BlockReadTracker<W> {
-    fn new(w: W, c: Box<ChecksumValidator>) -> BlockReadTracker<W> {
+    fn new(BlockReadState { w, read_position }: BlockReadState<W>, c: Box<ChecksumValidator>) -> BlockReadTracker<W> {
         BlockReadTracker {
             w, c,
             seqno: 0,
-            offset: 0,
-            local_error: None,
-            remote_error: None }
+            offset: read_position
+        }
     }
     fn check_sequencing(&self, seqno: i64, offset: i64) -> Result<()> {
         if self.seqno == seqno && self.offset == offset {
@@ -144,186 +171,127 @@ impl<W: Write> BlockReadTracker<W> {
         Ok(())
     }
 
-    fn apply(mut self, p: BlockDataPacket) -> Self {
-        trace!(target: "dt_proto", "BlockReadTracker: packet header={:?}, dlen={}, cksumlen={}", p.header, p.data.len(), p.checksum.len());
-        //if there is a remote error - do nothing, else
-        //if there is a local error - do everything except for a local operation itself
-        if self.remote_error.is_none() {
-            if let Err(e) = self.remote_op(&p) {
-                error!("BlockReadTracker: remote error at block {}: {}", self.seqno, e);
-                self.remote_error = Some(e);
-            } else {
-                if self.local_error.is_none() {
-                    if let Err(e) = self.write_data(&p.data) {
-                        error!("BlockReadTracker: local error: {}", e);
-                        self.local_error = Some(e);
-                    }
-                }
-            }
+    fn apply(mut self, p: BlockDataPacket) -> StdResult<Self, (Error, Self)> {
+        let r = self.remote_op(&p)
+            .and_then(|_| self.write_data(&p.data));
+
+        match r {
+            Ok(_) => Ok(self),
+            Err(e) => Err((e, self))
         }
-        self
     }
 
-    fn decons(self) -> (DtStatus, Option<Error>, Option<Error>, W) {
-        let s = match &self.remote_error {
-            &Some(Error::DataTransfer(s, _)) => s,
-            &Some(_) => DtStatus::ERROR,    //should never happen
-            &None => //see org.apache.hadoop.hdfs.RemoteBlockReader2.readNextPacket()
-                if self.c.is_trivial() { DtStatus::SUCCESS } else { DtStatus::CHECKSUM_OK }
-        };
-        (s, self.remote_error, self.local_error, self.w)
+    fn decons(self) -> (DtStatus, BlockReadState<W>) {
+        let a = if self.c.is_trivial() { DtStatus::SUCCESS } else { DtStatus::CHECKSUM_OK };
+        let b = BlockReadState::new(self.w, self.offset);
+        (a, b)
     }
 }
-/*
-pub struct ReadBlockRequest<'a> {
-    pub pool_id: &'a str,
-    pub block_id: u64,
-    pub generation_stamp: u64,
-    pub offset: u64,
-    pub num_bytes: u64
-}
-*/
 
 #[derive(Debug)]
 pub enum ReadBlock<W: Write + Send> {
-    Null(OpReadBlockProto, W),
-    ResponseWait(W),
+    Init(OpReadBlockProto, BlockReadState<W>),
+    ResponseWait(BlockReadState<W>),
     Packet(BlockReadTracker<W>),
-
-    //final states
-    Success(Option<Error>, Option<Error>, W),
-    ServerError(BlockOpResponseProto, W),
-    OtherError(IoError, W)
+    ClientReadStatusSendWait(BlockReadState<W>),
+    End(BlockReadState<W>)
 }
 
+
 impl<W> ReadBlock<W> where
-    W: Write + Send + Debug + 'static {
+   W: Write + Send + Debug + 'static {
 
-    pub fn new(h: BaseHeaderProto, offset: u64, len: u64, w: W) -> ReadBlock<W> {
-        let orbp = pb_cons!(OpReadBlockProto,
-            header: pb_cons!(ClientOperationHeaderProto,
-                //client_name: client_name.to_owned(),
-                base_header: h
-            ),
-            offset: offset,
-            len: len
-        );
+   pub fn new(h: BaseHeaderProto, offset: u64, len: u64, w: W) -> ReadBlock<W> {
+       let orbp = pb_cons!(OpReadBlockProto,
+           header: pb_cons!(ClientOperationHeaderProto,
+               //client_name: client_name.to_owned(),
+               base_header: h
+           ),
+           offset: offset,
+           len: len
+       );
 
-        ReadBlock::Null(orbp,w)
-    }
-
-    pub fn extract_resources(self) -> W {
-        match self {
-            ReadBlock::Null(_, w) |
-            ReadBlock::ResponseWait(w) |
-            ReadBlock::Packet(BlockReadTracker { w, .. }) |
-            ReadBlock::Success(_, _, w) |
-            ReadBlock::ServerError(_, w) |
-            ReadBlock::OtherError(_, w) =>
-                w
-        }
-    }
-
-    #[inline]
-    fn errvec(e1: Option<Error>, e2: Option<Error>, e3: Option<Error>) -> Vec<Error> {
-        let mut rv = Vec::new();
-        if let Some(e) = e1  { rv.push(e) }
-        if let Some(e) = e2  { rv.push(e) }
-        if let Some(e) = e3  { rv.push(e) }
-        rv
-    }
-
-    pub fn result(self) -> (W, Vec<Error>) {
-        match self {
-            ReadBlock::Success(r, l, w) =>
-                (w, Self::errvec(r, l, None)),
-            ReadBlock::ServerError(borp, w) => {
-                let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
-                (w, vec![app_error!(dt s, m)])
-            },
-            ReadBlock::OtherError(e, w) =>
-                (w, vec![e.into()]),
-            ReadBlock::Packet(BlockReadTracker { w, remote_error, local_error, .. }) =>
-                (w, Self::errvec(remote_error, local_error, Some(app_error!(other "invalid ReadBlock terminal state: Packet")))),
-            ReadBlock::ResponseWait(w) =>
-                (w, vec![app_error!(other "invalid ReadBlock terminal state: ResponseWait")]),
-            ReadBlock::Null(_, w) =>
-                (w, vec![app_error!(other "invalid ReadBlock terminal state: Null")])
-        }
-    }
+       ReadBlock::Init(orbp,BlockReadState::new(w, offset as i64))
+   }
+   pub fn state(self) -> BlockReadState<W> {
+       match self {
+           ReadBlock::Init(_, brs) |
+           ReadBlock::ClientReadStatusSendWait(brs) |
+           ReadBlock::ResponseWait(brs) |
+           ReadBlock::End(brs) =>
+               brs,
+           ReadBlock::Packet(brt) =>
+               brt.decons().1
+       }
+   }
 }
 
 impl<W> ProtocolFsm for ReadBlock<W> where W: Write + Send + Debug + 'static {
     fn idle(self) -> (ProtocolFsmResult, ReadBlock<W>) {
         match self {
-            ReadBlock::Null(orbp, w) =>
+            ReadBlock::Init(orbp, w) =>
                 pfsm!(send(DtReq::ReadBlock(orbp)) / goto ReadBlock::ResponseWait(w)),
-            s @ ReadBlock::ResponseWait(..) =>
-                pfsm!(wait/ goto s),
-            s @ ReadBlock::Packet(..) =>
-                pfsm!(wait/ goto s),
-            s @ ReadBlock::Success(..) =>
-                pfsm!(exit s),
-            s @ ReadBlock::ServerError(..) | s @ ReadBlock::OtherError(..) =>
-                pfsm!(exit s)
+            s @ ReadBlock::ResponseWait(..) |
+            s @ ReadBlock::Packet(..) |
+            s @ ReadBlock::End(..) =>
+                pfsm!(wait / goto s),
+            //pfsm!(return error(app_error!(other "Invalid s/e {:?}/idle", s))/ goto s)
+            ReadBlock::ClientReadStatusSendWait(w) =>
+                pfsm!(return success / goto ReadBlock::End(w))
         }
     }
 
     fn incoming(self, rsp: DtRsp) -> (ProtocolFsmResult, ReadBlock<W>) {
         match (self, rsp) {
-            (ReadBlock::ResponseWait(w), DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, borp))) =>
+            (ReadBlock::ResponseWait(brs), DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, borp))) =>
                 if has_data {
-                    pfsm!(wait / goto ReadBlock::Packet(build_block_read_tracker(borp, w)))
+                    pfsm!(wait / goto ReadBlock::Packet(build_block_read_tracker(borp, brs)))
                 } else {
-                    pfsm!(exit ReadBlock::ServerError(borp, w))
+                    let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
+                    pfsm!(return error(app_error!(dt s, m)) / goto ReadBlock::End(brs))
                 },
             (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::Packet(pkt))) =>
-                pfsm!(wait / goto ReadBlock::Packet(pt.apply(pkt))),
+                match pt.apply(pkt) {
+                    Ok(pt) => pfsm!(wait / goto ReadBlock::Packet(pt)),
+                    Err((e, pt)) => pfsm!(return error(e) / goto ReadBlock::End(pt.decons().1))
+                },
             (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::End)) => {
-                let (s, re, le, w) = pt.decons();
-                pfsm!(
-                    send(DtReq::ClientReadStatus(pb_cons!(ClientReadStatusProto, status: s))) /
-                        goto ReadBlock::Success(re, le, w))
-            },
+                let (s, rbs) = pt.decons();
+                let crs = pb_cons!(ClientReadStatusProto, status: s);
+                pfsm!(send(DtReq::ClientReadStatus(crs)) / goto ReadBlock::ClientReadStatusSendWait(rbs))
+            }
             //abnormal conditions
-            (s, e) =>
-                pfsm!(exit ReadBlock::OtherError(
-                    app_error!(other "Unexpected s/e {:?}/{:?}", s, e).into(),
-                    s.extract_resources()
-                ))
+            (ReadBlock::Init(_, brs), ev) =>
+                pfsm!(return error(app_error!(other "Unexpected s/e Init/{:?}", ev)) / goto ReadBlock::End(brs)),
+            (ReadBlock::Packet(pt), ev) =>
+                pfsm!(return error(app_error!(other "Unexpected s/e Packet/{:?}", ev)) / goto ReadBlock::End(pt.decons().1)),
+            (ReadBlock::ResponseWait(brs), ev) =>
+                pfsm!(return error(app_error!(other "Unexpected s/e ResponseWait/{:?}", ev)) / goto ReadBlock::End(brs)),
+            (ReadBlock::ClientReadStatusSendWait(brs), ev) =>
+                pfsm!(return error(app_error!(other "Unexpected s/e ClientReadStatusSendWait/{:?}", ev)) / goto ReadBlock::End(brs)),
+            (ReadBlock::End(brs), ev) =>
+                pfsm!(return error(app_error!(other "Unexpected s/e End/{:?}", ev)) / goto ReadBlock::End(brs))
         }
     }
 }
 
-impl<W> ErrorAccumulator for ReadBlock<W> where W: Write + Send + Debug +'static {
-    fn error(self, e: IoError) -> Self { ReadBlock::OtherError(e, self.extract_resources()) }
-}
-
-
-fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, w: W) -> BlockReadTracker<W> {
-    let roci =
-        pb_decons!(BlockOpResponseProto, borp, read_op_checksum_info);
-    let (checksum, _chunk_offset) =
-        pb_decons!(ReadOpChecksumInfoProto, roci, checksum, chunk_offset);
-    let (ctype, bpc) =
-        pb_decons!(ChecksumProto, checksum, type, bytes_per_checksum);
-    let ckalg: Box<ChecksumValidator> =
-        match if bpc == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
-            ChecksumTypeProto::CHECKSUM_NULL =>
-                Box::new(CVTrivial),
-            ChecksumTypeProto::CHECKSUM_CRC32 =>
-                Box::new(CVCRC32::new_crc32(bpc as usize)),
-            ChecksumTypeProto::CHECKSUM_CRC32C =>
-                Box::new(CVCRC32::new_crc32c(bpc as usize))
-        };
-    BlockReadTracker::new(w, ckalg)
-}
-
-pub fn read_block<W: Write + Send + Debug + 'static>(
-    c: Connection, h: BaseHeaderProto, offset: u64, len: u64, w: W
-) -> BF<((W, Vec<Error>), Connection), ReadBlock<W>> {
-    let fsm = ReadBlock::new(h, offset, len, w);
-    Box::new(c.run(fsm).map(|(c, p)|(p.result(), c)))
+fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, brs: BlockReadState<W>) -> BlockReadTracker<W> {
+   let roci =
+       pb_decons!(BlockOpResponseProto, borp, read_op_checksum_info);
+   let (checksum, _chunk_offset) =
+       pb_decons!(ReadOpChecksumInfoProto, roci, checksum, chunk_offset);
+   let (ctype, bpc) =
+       pb_decons!(ChecksumProto, checksum, type, bytes_per_checksum);
+   let ckalg: Box<ChecksumValidator> =
+       match if bpc == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
+           ChecksumTypeProto::CHECKSUM_NULL =>
+               Box::new(CVTrivial),
+           ChecksumTypeProto::CHECKSUM_CRC32 =>
+               Box::new(CVCRC32::new_crc32(bpc as usize)),
+           ChecksumTypeProto::CHECKSUM_CRC32C =>
+               Box::new(CVCRC32::new_crc32c(bpc as usize))
+       };
+   BlockReadTracker::new(brs, ckalg)
 }
 
 
@@ -334,61 +302,61 @@ fn test_read_block_simple() {
     //extern crate env_logger;
     //env_logger::init();
 
-    let t = spawn_test_server("127.0.0.1:60010", test_script!{
-        //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05
-        expect "\
-        00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:\
-        2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:\
-        20:05:12:03:61:62:63:10:00:18:05",
+    let t = spawn_test_server("127.0.0.1:60010", test_script! {
+       //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05
+       expect "\
+       00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:\
+       2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:\
+       20:05:12:03:61:62:63:10:00:18:05",
 
-        //S 0d:08:00:22:09:0a:05:08:02:10:80:04:10:00
-        send "0d:08:00:22:09:0a:05:08:02:10:80:04:10:00",
+       //S 0d:08:00:22:09:0a:05:08:02:10:80:04:10:00
+       send "0d:08:00:22:09:0a:05:08:02:10:80:04:10:00",
 
-        //S 00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:00:00:a9:c7:c0:1b
-        send "\
-        00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:\
-        00:00:a9:c7:c0:1b",
+       //S 00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:00:00:a9:c7:c0:1b
+       send "\
+       00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:\
+       00:00:a9:c7:c0:1b",
 
-        //S 41:42:43:44:0a
-        send "41:42:43:44:0a",
+       //S 41:42:43:44:0a
+       send "41:42:43:44:0a",
 
-        //S 00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:00:00
-        send "\
-        00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:\
-        00:00",
+       //S 00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:00:00
+       send "\
+       00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:\
+       00:00",
 
-        //E 02:08:06
-        expect "02 08 06"
+       //E 02:08:06
+       expect "02 08 06"
     });
 
     use std::net::ToSocketAddrs;
     use std::borrow::Cow;
     use futures::Future;
+    use futures::future::err;
 
     let addr = "127.0.0.1:60010".to_socket_addrs().unwrap().next().ok_or(app_error!(other "DN host not found")).unwrap();
     let conn = Connection::connect(&addr, "abc".to_owned());
 
     let h = pb_cons!(BaseHeaderProto,
-                    block: pb_cons!(ExtendedBlockProto,
-                        pool_id: "BP-1914853243-127.0.0.1-1500467607052".to_owned(),
-                        block_id: 1073742835,
-                        generation_stamp: 2015,
-                        num_bytes: 5
-                    )
-                );
+                   block: pb_cons!(ExtendedBlockProto,
+                       pool_id: "BP-1914853243-127.0.0.1-1500467607052".to_owned(),
+                       block_id: 1073742835,
+                       generation_stamp: 2015,
+                       num_bytes: 5
+                   )
+               );
 
     let fsm = ReadBlock::new(h, 0, 5, vec![]);
 
     let fut =
         conn.then(|w| match w {
             Ok(c) => c.run(fsm),
-            Err(e) => b_accumulate(fsm, e)//Box::new(err(fsm.error(e)))
+            Err(e) => Box::new(err((e.into(), fsm)))
         });
-    let r = fut.wait();
-
-    let (w, errs) = r.map(|(_conn, p)| p.result()).unwrap();
+    let (_c, rb) = fut.wait().unwrap();
+    let dt::BlockReadState { w, read_position } = rb.state();
     assert_eq!(w, vec![65, 66, 67, 68, 10]);
-    assert!(errs.is_empty());
+    assert_eq!(read_position, 5);
 
     //-----------------------------------
     let _ = t.join().unwrap();

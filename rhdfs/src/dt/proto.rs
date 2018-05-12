@@ -37,8 +37,10 @@ pub enum ProtocolFsmResult {
     Send(DtReq),
     /// Wait until a message arrives from the remote end
     Wait,
-    /// Exit the IO loop
-    Exit
+    /// Exit the IO loop with success
+    ReturnSuccess,
+    /// Exit the IO Loop with error
+    ReturnError(Error)
 }
 
 /// The macro for various protocol FSM event handler output flavors
@@ -46,7 +48,8 @@ pub enum ProtocolFsmResult {
 macro_rules! pfsm {
     {wait / goto $s:expr} => { (ProtocolFsmResult::Wait, $s) };
     {send ($r:expr) / goto $s:expr} => { (ProtocolFsmResult::Send($r), $s) };
-    {exit $s:expr} => { (ProtocolFsmResult::Exit, $s) };
+    {return success / goto $s:expr} => { (ProtocolFsmResult::ReturnSuccess, $s) };
+    {return error ($e:expr) / goto $s:expr} => { (ProtocolFsmResult::ReturnError($e), $s) };
 }
 
 
@@ -66,7 +69,7 @@ macro_rules! pfsm_trace {
 }
 
 /// Protocol FSM event handler
-pub trait ProtocolFsm : Debug + ErrorAccumulator {
+pub trait ProtocolFsm : Debug {
     /// Idle event occurs a) upon start or b) upon successful outgoing packet transmission
     fn idle(self) -> (ProtocolFsmResult, Self);
     /// The event is raised upon successful incoming packet reception
@@ -81,9 +84,6 @@ impl Connection {
                 .map(|c| Connection { io: c.framed(DtCodec::new()), client_name });
         Box::new(rv)
     }
-
-    //#[inline]
-    //pub fn client_name(&self) -> &str { &self.client_name }
 
     #[inline]
     fn broken_pipe_error() -> IoError {
@@ -113,7 +113,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn run<P>(self, p: P) -> BF<(Connection, P), P>
+    pub fn run<P>(self, p: P) -> BF<(Connection, P), (Error, P)>
         where P: ProtocolFsm + Send +'static {
         Box::new(FsmRunner::new(self, p))
     }
@@ -126,12 +126,12 @@ enum FsmRunner<P> {
     Null
 }
 
-type FRR<P> = StdResult<Async<(Connection, P)>, P>;
+type FRR<P> = StdResult<Async<(Connection, P)>, (Error, P)>;
 
 impl<P> Future for FsmRunner<P>
     where P: ProtocolFsm + Send +'static {
     type Item = (Connection, P);
-    type Error = P;
+    type Error = (Error, P);
 
     fn poll(&mut self) -> FRR<P> {
         #[inline]
@@ -149,8 +149,10 @@ impl<P> Future for FsmRunner<P>
                     absolutely_not_ready(FsmRunner::Send(p, c.send_req(req))),
                 ProtocolFsmResult::Wait =>
                     absolutely_not_ready(FsmRunner::Wait(p, c.get_resp())),
-                ProtocolFsmResult::Exit =>
-                    ready(Ok(Async::Ready((c, p))))
+                ProtocolFsmResult::ReturnSuccess =>
+                    ready(Ok(Async::Ready((c, p)))),
+                ProtocolFsmResult::ReturnError(e) =>
+                    ready(Err((e.into(), p)))
             }
         }
 
@@ -163,7 +165,7 @@ impl<P> Future for FsmRunner<P>
                     Ok(Async::Ready(c)) =>
                         process_result(c, p.idle()),
                     Err(e) =>
-                        ready(Err(p.error(e)))
+                        ready(Err((e.into(), p)))
                 }
                 FsmRunner::Wait(p, mut rsp_f) => match rsp_f.poll() {
                     Ok(Async::NotReady) =>
@@ -171,7 +173,7 @@ impl<P> Future for FsmRunner<P>
                     Ok(Async::Ready((rsp, c))) =>
                         process_result(c, p.incoming(rsp)),
                     Err(e) =>
-                        ready(Err(p.error(e)))
+                        ready(Err((e.into(), p)))
                 }
                 FsmRunner::Null =>
                     panic!("Unfused call to completed FsmRunner"),
@@ -181,13 +183,9 @@ impl<P> Future for FsmRunner<P>
         }
     }
 }
-//type Rules = ~[Prod<T,NT>];
-
-
 
 impl<P> FsmRunner<P>
     where P: ProtocolFsm + Send +'static {
 
     fn new(c: Connection, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
-
 }

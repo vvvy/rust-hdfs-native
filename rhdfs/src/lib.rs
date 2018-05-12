@@ -18,7 +18,6 @@ mod types;
 #[macro_use] mod util;
 #[macro_use] mod error;
 #[macro_use] mod protobuf_api;
-mod error_acc;
 mod result;
 mod codec_tools;
 mod dt;
@@ -31,7 +30,6 @@ pub mod config;
 
 pub use types::*;
 pub use error::*;
-pub use error_acc::*;
 pub use result::*;
 pub use cpool::*;
 pub use reactor::*;

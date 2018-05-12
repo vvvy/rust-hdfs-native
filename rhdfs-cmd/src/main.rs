@@ -62,7 +62,7 @@ fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
             SessionData { effective_user: cfg.effective_user.clone()  }
         );
 
-    let mut rr = ReactorRunner::new(s);
+    let mut rr = SyncReactorRunner::new(s);
 
     match cmd {
         Command::GetListing(args) =>
@@ -92,10 +92,9 @@ fn test_perms_s() {
 
 }
 
-fn get_listing(r: &mut ReactorRunner, c: &ReactorClient, args: args::GetListing) -> Result<()> {
+fn get_listing(r: &mut SyncReactorRunner, c: &ReactorClient, args: args::GetListing) -> Result<()> {
     struct PSink {
-        src: Vec<String>,
-        err: Vec<IoError>
+        src: Vec<String>
     }
 
     impl hdfs::ListingSink for PSink {
@@ -137,26 +136,14 @@ fn get_listing(r: &mut ReactorRunner, c: &ReactorClient, args: args::GetListing)
         }
     }
 
-    impl ErrorAccumulator for PSink {
-        fn error(self, e: IoError) -> Self {
-            PSink { err: vec_cons(self.err, e), ..self}
-        }
-    }
-
-    impl ErrorExtractor for PSink {
-        fn extract_errors(mut self) -> (Vec<IoError>, Self) {
-            (std::mem::replace(&mut self.err, vec![]), self)
-        }
-    }
-
     let src2 = args.src.clone();
-    let (errs, _) = r.exec_x(hdfs::get_listing(
+    let (_, rv) = r.exec(hdfs::get_listing(
         c,
         config::GetListing { src: args.src, need_location: false },
-        PSink { src: src2, err: vec![] }
-    ));
+        PSink { src: src2 }
+    )).commute();
 
-    result_from_errors(errs)
+    rv
 }
 
 use std::path::{Path, PathBuf};
@@ -215,7 +202,7 @@ fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
 }
 
 
-fn get(r: &mut ReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<()> {
+fn get(r: &mut SyncReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<()> {
     use std::fs::File;
 
     let copy_vec = build_copy_list(args.fs)?;
@@ -224,10 +211,10 @@ fn get(r: &mut ReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<(
     for (src, dst) in copy_vec {
         debug!("Copying {} -> {}", src, dst.display());
         let of = File::create(dst)?;
-        let (c1, (errs, get)) = r.exec_pair(hdfs::get(c, src, of));
+        let ((c1, get), rv) = r.exec(hdfs::get(c, src, of)).commute();
         c = c1;
-        debug!("get result: {:?} {:?}", errs, get);
-        let _ = result_from_errors(errs)?;
+        debug!("get result: {:?} {:?}", rv, get);
+        let _ = rv?;
     }
 
     Ok(())

@@ -14,11 +14,12 @@ use super::codec::{NnCodec, NnQ, NnR, RpcReq, RpcRsp, HandshakeContext, OpContex
 
 pub enum ProtocolFsmResult {
     Send(NnQ),
-    Exit
+    ReturnSuccess,
+    ReturnError(Error)
 }
 
 /// Protocol FSM event handler
-pub trait ProtocolFsm: ErrorAccumulator {
+pub trait ProtocolFsm {
     /// called upon start of operation
     fn start(self) -> (ProtocolFsmResult, Self);
     /// called upon incoming message arrival
@@ -158,7 +159,7 @@ impl Connection {
         Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
     }
 
-    pub fn run<P>(self, p: P) -> BF<(Connection, P), P>
+    pub fn run<P>(self, p: P) -> BF<(Connection, P), (Error, P)>
         where P: ProtocolFsm + Send + 'static {
         Box::new(FsmRunner::new(self, p))
     }
@@ -170,12 +171,12 @@ enum FsmRunner<P> {
     Null
 }
 
-type FRR<P> = StdResult<Async<(Connection, P)>, P>;
+type FRR<P> = StdResult<Async<(Connection, P)>, (Error, P)>;
 
 impl<P> Future for FsmRunner<P>
     where P: ProtocolFsm + Send +'static {
     type Item = (Connection, P);
-    type Error = P;
+    type Error = (Error, P);
 
     fn poll(&mut self) -> FRR<P> {
         #[inline]
@@ -191,8 +192,10 @@ impl<P> Future for FsmRunner<P>
             match r {
                 ProtocolFsmResult::Send(req) =>
                     absolutely_not_ready(FsmRunner::Op(p, c.call(req))),
-                ProtocolFsmResult::Exit =>
-                    ready(Ok(Async::Ready((c, p))))
+                ProtocolFsmResult::ReturnSuccess =>
+                    ready(Ok(Async::Ready((c, p)))),
+                ProtocolFsmResult::ReturnError(e) =>
+                    ready(Err((e, p)))
             }
         }
 
@@ -205,7 +208,7 @@ impl<P> Future for FsmRunner<P>
                     Ok(Async::Ready((rsp, c))) =>
                         process_result(c, p.incoming(rsp)),
                     Err(e) =>
-                        ready(Err(p.error(e)))
+                        ready(Err((e.into(), p)))
                 }
                 FsmRunner::Null =>
                     panic!("Unfused call to completed FsmRunner"),
@@ -231,7 +234,7 @@ pub enum CallW {
     Q(NnQ),
     Waiting,
     R(NnR),
-    Err(IoError)
+    Error
 }
 
 impl CallW {
@@ -242,21 +245,21 @@ impl ProtocolFsm for CallW {
     fn start(self) -> (ProtocolFsmResult, Self) {
         match self {
             CallW::Q(q) => (ProtocolFsmResult::Send(q), CallW::Waiting),
-            x => (ProtocolFsmResult::Exit, CallW::Err(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x).into()))
+            x => (ProtocolFsmResult::ReturnError(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x)), CallW::Error)
         }
     }
 
     fn incoming(self, r: NnR) -> (ProtocolFsmResult, Self) {
         match self {
-            CallW::Waiting => (ProtocolFsmResult::Exit, CallW::R(r)),
-            x => (ProtocolFsmResult::Exit, CallW::Err(app_error!(other "invalid CallWrapper state: expected Null, got `{:?}`", x).into()))
+            CallW::Waiting => (ProtocolFsmResult::ReturnSuccess, CallW::R(r)),
+            x => (ProtocolFsmResult::ReturnError(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x)), CallW::Error)
         }
     }
 }
 
-impl ErrorAccumulator for CallW {
-    fn error(self, e: IoError) -> Self { CallW::Err(e) }
-}
+//impl ErrorAccumulator for CallW {
+//    fn error(self, e: IoError) -> Self { CallW::Err(e) }
+//}
 
 
 fn get_method_name(q: &NnQ) -> String {

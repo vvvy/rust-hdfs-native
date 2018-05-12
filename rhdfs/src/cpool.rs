@@ -24,9 +24,9 @@ pub trait ConnectionPool<K, A, C> {
 
     /// run a protocol fsm object 'r' through a connection. 'r' accumulates connection errors among
     /// other errors.
-    fn run<F, R>(&self, key: K, addr: Option<A>, r: R, f: F) -> BF<R, R> where
-        R: Send + ErrorAccumulator + 'static,
-        F: FnOnce((C, R)) -> BF<(C, R), R> + Send + 'static;
+    fn run<F, R>(&self, key: K, addr: Option<A>, r: R, f: F) -> BF<R, (Error, R)> where
+        R: Send + 'static,
+        F: FnOnce((C, R)) -> BF<(C, R), (Error, R)> + Send + 'static;
 }
 
 pub trait Connector<A, C> {
@@ -307,9 +307,9 @@ impl<K, A, C> ConnectionPool<K, A, C> for ConnectionPoolClient<K, A, C> where
         ))
     }
 
-    fn run<F, R>(&self, key: K, addr: Option<A>, r: R, f: F) -> BF<R, R> where
-        R: Send + ErrorAccumulator + 'static,
-        F: FnOnce((C, R)) -> BF<(C, R), R> + Send + 'static {
+    fn run<F, R>(&self, key: K, addr: Option<A>, r: R, f: F) -> BF<R, (Error, R)> where
+        R: Send + 'static,
+        F: FnOnce((C, R)) -> BF<(C, R), (Error, R)> + Send + 'static {
 
         let s1 = self.s.clone();
         let k = key.clone();
@@ -321,12 +321,12 @@ impl<K, A, C> ConnectionPool<K, A, C> for ConnectionPoolClient<K, A, C> where
                             s1.send(CPCmd::Return(k, c))
                                 .then(|u| match u {
                                     Ok(_) => Ok(r),
-                                    Err(e) => Err(r.error(app_error!(other "cpool: sink transmission error: {:?}", e).into()))
+                                    Err(e) => Err((app_error!(other "cpool: sink transmission error: {:?}", e), r))
                                 })
                         }
-                    )) as BF<R, R>,
+                    )) as BF<R, (Error, R)>,
                 Err(e) =>
-                    Box::new(err(r.error(e)))
+                    Box::new(err((e.into(), r)))
             });
 
         Box::new(f)
@@ -348,15 +348,16 @@ pub fn create_connection_pool<K, A, C, O, T>(o: O, t: T, buffer: usize, init_a: 
 
 
 /// Synchronous future runner
-pub struct Runner<S> {
+pub struct SyncRunner<S> {
+    /// renewable carrier future
     s: Option<BFI<S>>
 }
 
-impl<S> Runner<S> {
-    pub fn new(s: BFI<S>) -> Runner<S> { Runner { s: Some(s) } }
+impl<S> SyncRunner<S> {
+    pub fn new(s: BFI<S>) -> SyncRunner<S> { SyncRunner { s: Some(s) } }
 
     /// executes `rf` synchronously.
-    pub fn exec_r<R, U>(&mut self, rf: BF<R, U>) -> StdResult<R, U> {
+    pub fn exec<R, U>(&mut self, rf: BF<R, U>) -> StdResult<R, U> {
         use futures::future::Either;
 
         let s = std::mem::replace(&mut self.s, None);
@@ -378,30 +379,6 @@ impl<S> Runner<S> {
         self.s = s;
         r
     }
-
-    ///exec and unwrap
-    #[inline]
-    #[cfg(test)]
-    pub fn exec_u<R>(&mut self, rf: BFTT<R>) -> (bool, R) {
-        biunwrap(self.exec_r(rf))
-    }
-
-    ///exec and extract errors
-    #[inline]
-    pub fn exec_x<R>(&mut self, rf: BFTT<R>) -> (Vec<IoError>, R) where R: ErrorExtractor {
-        ErrorExtractor::from_result(self.exec_r(rf))
-    }
-
-    ///exec_y
-    #[inline]
-    pub fn exec_pair<C, R>(&mut self, rf: BFT<(C, R)>) -> (C, (Vec<IoError>, R)) where R: ErrorExtractor {
-        match self.exec_r(rf) {
-            Ok((c, r)) => (c, ErrorExtractor::extract_errors(r)),
-            Err(()) => panic!("Unexpected future output on Error channel")
-        }
-    }
-
-
 }
 
 #[cfg(test)]
@@ -441,14 +418,8 @@ pub mod test {
         }
     }
 
-    //pub type CPS = ConnectionPoolServer<String, String, String, CI, TrivialAgeCheckerFactoryImpl>;
-
+    #[derive(Debug)]
     pub struct R { pub s: String }
-    impl ErrorAccumulator for R {
-        fn error(self, _e: IoError) -> Self {
-            unimplemented!()
-        }
-    }
 }
 
 
@@ -464,34 +435,34 @@ fn test_cp_sync() {
             vec![]
         );
 
-    let mut cr = Runner::new(s);
+    let mut cr = SyncRunner::new(s);
 
-    let r = cr.exec_u(c.run(
+    let r = cr.exec(c.run(
         "A".to_owned(),
         Some("cA".to_owned()),
         R { s:"-x".to_owned() },
         |(c, r)| { let r = R { s: c.clone() + &r.s };  Box::new(ok((c, r))) }
         ));
 
-    assert_eq!(r.1.s, "CONN-0-cA-x");
+    assert_eq!(r.unwrap().s, "CONN-0-cA-x");
 
-    let r = cr.exec_u(c.run(
+    let r = cr.exec(c.run(
             "A".to_owned(),
             Some("cA".to_owned()),
             R { s:"-y".to_owned() },
             |(c, r)| { let r = R { s: c.clone() + &r.s};  Box::new(ok((c, r))) }
         ));
 
-    assert_eq!(r.1.s, "CONN-0-cA-y");
+    assert_eq!(r.unwrap().s, "CONN-0-cA-y");
 
-    let r = cr.exec_u(c.run(
+    let r = cr.exec(c.run(
             "B".to_owned(),
             Some("cB".to_owned()),
             R { s:"-z".to_owned() },
             |(c, r)| { let r = R { s: c.clone() + &r.s};  Box::new(ok((c, r))) }
         ));
 
-    assert_eq!(r.1.s, "CONN-1-cB-z");
+    assert_eq!(r.unwrap().s, "CONN-1-cB-z");
 }
 
 #[test]
@@ -511,7 +482,7 @@ fn test_cp_async() {
     });
 
 
-    fn ts(w: BFTT<R>) -> R {
+    fn ts(w: BFTET<R>) -> R {
         match w.wait() {
             Ok(s) => s,
             _ => panic!("Invalid test outcome")

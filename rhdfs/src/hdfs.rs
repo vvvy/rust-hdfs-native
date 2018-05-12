@@ -27,13 +27,12 @@ struct GetListingState<LS> {
     src: std::collections::LinkedList<String>,
     pos: usize,
     ls: LS,
-    need_location: bool,
-    err: Vec<IoError>
+    need_location: bool
 }
 
 impl<LS> GetListingState<LS> {
     fn new(ls: LS, args: config::GetListing) -> GetListingState<LS> {
-        GetListingState { src: args.src.into_iter().collect(), pos: 0, ls, need_location: args.need_location, err: vec![] }
+        GetListingState { src: args.src.into_iter().collect(), pos: 0, ls, need_location: args.need_location }
     }
 }
 
@@ -41,7 +40,7 @@ impl<LS> nn::ProtocolFsm for GetListingState<LS> where LS: ListingSink {
 
     fn start(self) -> (nn::ProtocolFsmResult, Self) {
         let next = if self.src.is_empty() {
-            nn::ProtocolFsmResult::Exit
+            nn::ProtocolFsmResult::ReturnSuccess
         } else {
             let cur_src =
                 self.src.front().map(|v|v.clone()).unwrap_or(String::new());
@@ -59,8 +58,8 @@ impl<LS> nn::ProtocolFsm for GetListingState<LS> where LS: ListingSink {
         let r = match nr {
             NnR::GetListing(glr) => glr,
             o => return (
-                nn::ProtocolFsmResult::Exit,
-                Self { err: vec_cons(self.err,app_error!(other "unexpected response: expected `NnR::GetListing` but got {:?}", o).into()), ..self }
+                nn::ProtocolFsmResult::ReturnError(app_error!(other "unexpected response: expected `NnR::GetListing` but got {:?}", o)),
+                self
             )
         };
 
@@ -79,7 +78,7 @@ impl<LS> nn::ProtocolFsm for GetListingState<LS> where LS: ListingSink {
         self.ls.files(fs, pos, last_in_src, last);
 
         let next = if last {
-            nn::ProtocolFsmResult::Exit
+            nn::ProtocolFsmResult::ReturnSuccess
         } else {
             //current src (must be Some())
             let cur_src =
@@ -101,12 +100,8 @@ impl<LS> nn::ProtocolFsm for GetListingState<LS> where LS: ListingSink {
     }
 }
 
-impl<LS> ErrorAccumulator for GetListingState<LS> {
-    fn error(self, e: IoError) -> Self { GetListingState { err: vec_cons(self.err, e), ..self } }
-}
-
-pub fn get_listing<LS: ListingSink + 'static>(rc: &ReactorClient, args: config::GetListing, ls: LS) -> BFTT<LS> {
-    bimap(rc.run_nn(GetListingState::new(ls, args)), |gls| gls.ls)
+pub fn get_listing<LS: ListingSink + 'static>(rc: &ReactorClient, args: config::GetListing, ls: LS) -> BFTET<LS> {
+    rc.run_nn(GetListingState::new(ls, args)).bimap(|gls| gls.ls)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -185,9 +180,7 @@ pub struct Get {
     /// state
     s: (GBLS, GBS),
     /// done indicator
-    finished: bool,
-    /// errors accumulated so far
-    err: Vec<IoError>
+    finished: bool
 }
 
 type GetOperation = ReactorOperation<nn::CallW, dt::ReadBlock<File>>;
@@ -200,11 +193,10 @@ impl Get {
         write_offset: 0,
         q: VecDeque::new(),
         s: (GBLS::Idle, GBS::Idle(dst)),
-        finished: false,
-        err: vec![]
+        finished: false
     } }
 
-    fn with_error(self, e: Error) -> Self { Get { err: vec_cons(self.err, e.into()), ..self } }
+    //fn with_error(self, e: Error) -> Self { Get { err: vec_cons(self.err, e.into()), ..self } }
 
     fn idle(mut self) -> (Option<IoResult<GetOperation>>, Self) {
         match self.s {
@@ -285,21 +277,15 @@ impl Get {
     }
 
     fn rbr(mut self, rb: dt::ReadBlock<File>) -> (Option<IoResult<GetOperation>>, Self) {
-        let (w, mut err) = rb.result();
+        let dt::BlockReadState { w, read_position: _ } = rb.state();
 
         let s = match self.s {
-            (gbls, GBS::GetBlock { b, offset, len }) =>
-                if let Some(e) = err.pop() {
-                    //TODO
-                    //w.position(self.write_offset)
-                    (gbls, GBS::GetBlock { b, offset, len })
-
-                } else {
-                    self.read_offset += len;
-                    self.write_offset += len as usize;
-                    (gbls, GBS::Idle(w))
-                },
-            s => return (Some(Err(app_error!(other "Invalid /rbr").into())), Self { s, ..self})
+            (gbls, GBS::GetBlock { b:_, offset:_, len }) => {
+                self.read_offset += len;
+                self.write_offset += len as usize;
+                (gbls, GBS::Idle(w))
+            },
+            s => return (Some(Err(app_error!(other "Invalid /rbr").into())), Self { s, ..self })
         };
         Self { s, ..self }.idle()
     }
@@ -342,11 +328,11 @@ impl Get {
     }
 
     /// Converts result into the generic form
-    fn c_result(a: (Option<IoResult<GetOperation>>, Self)) -> (Vec<GetOperation>, Self) {
+    fn c_result(a: (Option<IoResult<GetOperation>>, Self)) -> (Result<Vec<GetOperation>>, Self) {
         match a {
-            (Some(Ok(op)), sf) => (vec![op], sf),
-            (Some(Err(e)), sf) => (vec![], sf.with_error(e.into())),
-            (None, sf) => (vec![], sf)
+            (Some(Ok(op)), sf) => (Ok(vec![op]), sf),
+            (Some(Err(e)), sf) => (Err(e.into()), sf),
+            (None, sf) => (Ok(vec![]), sf)
         }
     }
 }
@@ -355,11 +341,11 @@ impl ReactorProtocolFsm for Get {
     type FN = nn::CallW;
     type FD = dt::ReadBlock<File>;
 
-    fn start(self) -> (Vec<ReactorOperation<Self::FN, Self::FD>>, Self) {
+    fn start(self) -> (Result<Vec<ReactorOperation<Self::FN, Self::FD>>>, Self) {
         Self::c_result(self.idle())
     }
 
-    fn complete(self, op: GetOperation) -> (Vec<GetOperation>, Self) {
+    fn complete(self, op: GetOperation) -> (Result<Vec<GetOperation>>, Self) {
         match op {
             ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(nn::CallW::R(r)) } => {
                 let r = get_block_locations_result(r);
@@ -371,38 +357,31 @@ impl ReactorProtocolFsm for Get {
                 Self::c_result(self.rbr(rb))
             }
             o =>
-                (vec![], self.with_error(app_error!(other "Invalid RO result {:?}", o)))
+                (Err(app_error!(other "Invalid RO result {:?}", o)), self)
         }
     }
 
-    fn error(self, op: GetOperation) -> (Vec<GetOperation>, Self) {
+    fn error(self, e: Error, op: GetOperation) -> (Result<Vec<GetOperation>>, Self) {
         error!("Get: error on: {:?}", op);
         match op {
-            ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(nn::CallW::Err(e)) } => {
-                (vec![], self.with_error(e.into()))
-            }
+            //ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(_ /*nn::CallW::Null*/) } => {
+            //    (Err(e), self)
+            //}
             ReactorOperation { key: _, addr: _, p: CProtocolFsm::DT(rb) } => {
-                let (w, mut err) = rb.result();
-                let err = err.pop().unwrap_or_else(|| app_error!(other "Unknown error"));
-                (vec![], Self { s: (GBLS::Idle, GBS::Idle(w)), finished: true, ..self }.with_error(err.into()))
+                let dt::BlockReadState { w, read_position: _ } = rb.state();
+                //TODO: switch to next datanode, resume
+                // (gbls, GBS::GetBlock { b, offset, len }) =>
+                //w.position(self.write_offset)
+                //(gbls, GBS::GetBlock { b, offset, len })
+                (Err(e), Self { s: (GBLS::Idle, GBS::Idle(w)), finished: true, ..self })
             }
-            o =>
-                (vec![], self.with_error(app_error!(other "generic RO error: {:?}", o)))
+            _ =>
+                (Err(e), self)
         }
     }
 }
 
-impl ErrorAccumulator for Get {
-    fn error(self, e: IoError) -> Self { self.with_error(e.into())  }
-}
-
-impl ErrorExtractor for Get {
-    fn extract_errors(mut self) -> (Vec<IoError>, Self) {
-        (std::mem::replace(&mut self.err, vec![]), self)
-    }
-}
-
-pub fn get(rc: ReactorClient, src: String, dst: File) -> BFT<(ReactorClient, Get)> {
+pub fn get(rc: ReactorClient, src: String, dst: File) -> BFTET<(ReactorClient, Get)> {
      rc.run(Get::new(src, dst))
 }
 

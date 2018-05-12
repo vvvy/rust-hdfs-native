@@ -92,7 +92,9 @@ pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
     GetListingRequestProto,
     GetListingResponseProto,
     GetBlockLocationsRequestProto,
-    GetBlockLocationsResponseProto
+    GetBlockLocationsResponseProto,
+    AddBlockRequestProto,
+    AddBlockResponseProto
 };
 
 pub use protocolpb::proto::hadoop::RpcHeader::{
@@ -134,6 +136,16 @@ macro_rules! pbdb {
 { GetBlockLocationsRequestProto, length, $a:tt }=> { pbdbf!{ get_length, set_length, $a } };
 
 { GetBlockLocationsResponseProto, locations, $a:tt }=> { pbdbf!{ take_locations, set_locations, $a } };
+
+// (src, client_name, previous, exclude_nodes, file_id, favored_nodes)
+{ AddBlockRequestProto, src, $a:tt }=> { pbdbf!{ get_src, set_src, $a } };
+{ AddBlockRequestProto, client_name, $a:tt }=> { pbdbf!{ get_clientName, set_clientName, $a } };
+{ AddBlockRequestProto, previous, $a:tt }=> { pbdbf!{ get_previous, set_previous, $a } };
+{ AddBlockRequestProto, exclude_nodes, $a:tt }=> { pbdbf!{ get_excludeNodes, set_excludeNodes, $a } };
+{ AddBlockRequestProto, file_id, $a:tt }=> { pbdbf!{ get_fileId, set_fileId, $a } };
+{ AddBlockRequestProto, favored_nodes, $a:tt }=> { pbdbf!{ get_favoredNodes, set_favoredNodes, $a } };
+
+{ AddBlockResponseProto, block, $a:tt }=> { pbdbf!{ get_block, set_block, $a } };
 
 //hdfs.proto
 { DirectoryListingProto, partial_listing, $a:tt } => { pbdbf!{ get_partialListing, set_partialListing, $a } };

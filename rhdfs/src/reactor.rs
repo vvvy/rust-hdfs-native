@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr};
 
 use futures::{Future, Async};
-use futures::future::{ok, err};
+use futures::future::err;
 
 use nn;
 use dt;
@@ -58,21 +58,19 @@ impl<FN, FD> ReactorOperation<FN, FD> {
 /// Operations vector
 pub type ReactorOpVec<FN, FD> = Vec<ReactorOperation<FN, FD>>;
 
-//pub type RResult<V, R> = StdResult<(V, R), (IoError, R)>;
-
 /// An FSM describing a 'meta operation' across a namenode and a set of datanodes
 pub trait ReactorProtocolFsm where Self: Sized {
     /// Namenode operation type
     type FN;
     /// Datatransfer operation type
     type FD;
-    fn start(self) -> (ReactorOpVec<Self::FN, Self::FD>, Self);
-    fn complete(self, op: ReactorOperation<Self::FN, Self::FD>) -> (ReactorOpVec<Self::FN, Self::FD>, Self);
-    fn error(self, op: ReactorOperation<Self::FN, Self::FD>) -> (ReactorOpVec<Self::FN, Self::FD>, Self);
+    fn start(self) -> (Result<ReactorOpVec<Self::FN, Self::FD>>, Self);
+    fn complete(self, op: ReactorOperation<Self::FN, Self::FD>) -> (Result<ReactorOpVec<Self::FN, Self::FD>>, Self);
+    fn error(self, e: Error, op: ReactorOperation<Self::FN, Self::FD>) -> (Result<ReactorOpVec<Self::FN, Self::FD>>, Self);
 }
 
 /// Future of `ReactorOperation`
-type ReactorOpF<FN, FD> = BFTT<ReactorOperation<FN, FD>>;
+type ReactorOpF<FN, FD> = BF<ReactorOperation<FN, FD>, (Error, ReactorOperation<FN, FD>)>;
 
 pub enum ReactorConnection {
     NN(nn::Connection),
@@ -172,20 +170,21 @@ pub const DEFAULT_NN_KEY: &'static str = "*";
 
 pub fn default_nn_key() -> CKey { CKey::NN(DEFAULT_NN_KEY.to_owned()) }
 
+
 impl ReactorClient {
     #[inline]
-    pub fn run<P>(self, p: P)-> BFT<(Self, P)>  where
+    pub fn run<P>(self, p: P)-> BFTET<(Self, P)>  where
         P: ReactorProtocolFsm + Send + 'static,
         P::FN: nn::ProtocolFsm + Send + 'static,
         P::FD: dt::ProtocolFsm + Send + 'static {
         Box::new(FsmRunner::new(self, p))
     }
 
-    fn conn_type_error() -> IoError {
-        app_error!(other "INTERNAL: conn type mismatch").into()
+    fn conn_type_error() -> Error {
+        app_error!(other "INTERNAL: conn type mismatch")
     }
 
-    pub fn run_nn_ex<FN>(&self, k: String, a: Option<CAddr>, p: FN) -> BFTT<FN> where
+    pub fn run_nn_ex<FN>(&self, k: String, a: Option<CAddr>, p: FN) -> BF<FN, (Error, FN)> where
         FN: nn::ProtocolFsm + Send + 'static {
         self.pool.run(
             CKey::NN(k),
@@ -195,12 +194,12 @@ impl ReactorClient {
                 if let ReactorConnection::NN(c) = c {
                     Box::new(c.run(p).map(|(c, p)| (ReactorConnection::NN(c), p)))
                 } else {
-                    Box::new(err(p.error(Self::conn_type_error())))
+                    Box::new(err((Self::conn_type_error(), p)))
                 }
         )
     }
 
-    pub fn run_nn<FN>(&self, p: FN) -> BFTT<FN> where
+    pub fn run_nn<FN>(&self, p: FN) -> BF<FN, (Error, FN)> where
         FN: nn::ProtocolFsm + Send + 'static {
         self.run_nn_ex(DEFAULT_NN_KEY.to_owned(), None, p)
     }
@@ -213,7 +212,7 @@ impl ReactorClient {
                 if let ReactorConnection::NN(c) = c {
                     Box::new(c.call(q).map(|(r, c)| (ReactorConnection::NN(c), r)))
                 } else {
-                    Box::new(err(Self::conn_type_error()))
+                    Box::new(err(Self::conn_type_error().into()))
             }
         )
     }
@@ -222,7 +221,7 @@ impl ReactorClient {
         self.call_nn_ex(DEFAULT_NN_KEY.to_owned(), None, q)
     }
 
-    pub fn run_dt<FD>(&self, k: String, a: Option<CAddr>, p: FD) -> BFTT<FD> where
+    pub fn run_dt<FD>(&self, k: String, a: Option<CAddr>, p: FD) -> BF<FD, (Error, FD)> where
         FD: dt::ProtocolFsm + Send + 'static {
         self.pool.run(
             CKey::DT(k),
@@ -232,27 +231,25 @@ impl ReactorClient {
                 if let ReactorConnection::DT(c) = c {
                     Box::new(c.run(p).map(|(c, p)| (ReactorConnection::DT(c), p)))
                 } else {
-                    Box::new(err(p.error(Self::conn_type_error())))
+                    Box::new(err((Self::conn_type_error(), p)))
                 }
         )
     }
 
     /// execute a generic operation against the connection pools
-    fn exec_op<FN, FD>(&self, op: ReactorOperation<FN, FD>) -> BFTT<ReactorOperation<FN, FD>> where
+    fn exec_op<FN, FD>(&self, op: ReactorOperation<FN, FD>) -> ReactorOpF<FN, FD> where
         FN: nn::ProtocolFsm + Send + 'static,
         FD: dt::ProtocolFsm + Send + 'static {
         match op {
             ReactorOperation { key: k, addr: a, p: CProtocolFsm::NN(p) } => {
                 let (k1, a1) = (k.clone(), a.clone());
-                bimap(
-                    self.run_nn_ex(k, a, p),
+                self.run_nn_ex(k, a, p).bimap(
                     |p1| ReactorOperation { key: k1, addr: a1, p: CProtocolFsm::NN(p1) }
                 )
             },
             ReactorOperation { key: k, addr: a, p: CProtocolFsm::DT(p) } => {
                 let (k1, a1) = (k.clone(), a.clone());
-                bimap(
-                    self.run_dt(k, a, p),
+                self.run_dt(k, a, p).bimap(
                     |p1| ReactorOperation { key: k1, addr: a1, p: CProtocolFsm::DT(p1) }
                 )
             }
@@ -262,10 +259,8 @@ impl ReactorClient {
 
 type SelectAllBF<FN, FD> =  BF<
     (ReactorOperation<FN, FD>, usize, Vec<ReactorOpF<FN, FD>>),
-    (ReactorOperation<FN, FD>, usize, Vec<ReactorOpF<FN, FD>>)
+    ((Error, ReactorOperation<FN, FD>), usize, Vec<ReactorOpF<FN, FD>>)
 >;
-
-
 
 enum FsmRunner<P> where P: ReactorProtocolFsm + Send + 'static {
     Init(ReactorClient, P),
@@ -273,14 +268,14 @@ enum FsmRunner<P> where P: ReactorProtocolFsm + Send + 'static {
     Null
 }
 
-type FRR<P> = StdResult<Async<(ReactorClient, P)>, ()>;
+type FRR<P> = StdResult<Async<(ReactorClient, P)>, (Error, (ReactorClient, P))>;
 
 impl<P> Future for FsmRunner<P> where
     P: ReactorProtocolFsm + Send + 'static,
     P::FN: nn::ProtocolFsm + Send + 'static,
     P::FD: dt::ProtocolFsm + Send + 'static {
     type Item = (ReactorClient, P);
-    type Error = ();
+    type Error = (Error, (ReactorClient, P));
 
     fn poll(&mut self) -> FRR<P> {
         #[inline]
@@ -295,16 +290,26 @@ impl<P> Future for FsmRunner<P> where
         fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) where
             P: ReactorProtocolFsm + Send + 'static { (FsmRunner::Null, Some(v)) }
 
-        fn process_result<P>(c: ReactorClient, (r, p): (ReactorOpVec<P::FN, P::FD>, P), rest: Vec<ReactorOpF<P::FN, P::FD>>) -> (FsmRunner<P>, Option<FRR<P>>) where
+        fn process_result<P>(
+            c: ReactorClient,
+            (r, p): (Result<ReactorOpVec<P::FN, P::FD>>, P),
+            rest: Vec<ReactorOpF<P::FN, P::FD>>)
+            -> (FsmRunner<P>, Option<FRR<P>>) where
             P: ReactorProtocolFsm + Send + 'static,
             P::FN: nn::ProtocolFsm + Send + 'static,
             P::FD: dt::ProtocolFsm + Send + 'static {
-            let ops = vec_plus(rest, r.into_iter().map(|op| c.exec_op(op)).collect());
-            if ops.is_empty() {
-                ready(Ok(Async::Ready((c, p))))
-            } else {
-                //TODO: specially handle ops.len() == 1 via `FsmRunner::One(ReactorClient, P, ReactorOpF<FN, FD>)`
-                absolutely_not_ready(FsmRunner::Many(c,p, Box::new(futures::future::select_all(ops))))
+            match r {
+                Ok(r) => {
+                    let ops = vec_plus(rest, r.into_iter().map(|op| c.exec_op(op)).collect());
+                    if ops.is_empty() {
+                        ready(Ok(Async::Ready((c, p))))
+                    } else {
+                        //TODO: specially handle ops.len() == 1 via `FsmRunner::One(ReactorClient, P, ReactorOpF<FN, FD>)`
+                        absolutely_not_ready(FsmRunner::Many(c,p, Box::new(futures::future::select_all(ops))))
+                    }
+                }
+                Err(e) =>
+                    ready(Err((e, (c, p))))
             }
         }
 
@@ -316,8 +321,8 @@ impl<P> Future for FsmRunner<P> where
                         not_ready(FsmRunner::Many(c, p, f)),
                     Ok(Async::Ready((completed, _offset, rest))) =>
                         process_result(c, p.complete(completed), rest),
-                    Err((in_error, _offset, rest)) =>
-                        process_result(c, p.error(in_error), rest)
+                    Err(((e, in_error), _offset, rest)) =>
+                        process_result(c, p.error(e, in_error), rest)
                 }
                 FsmRunner::Null =>
                     panic!("Unfused call to completed FsmRunner")
@@ -338,7 +343,7 @@ impl<P> FsmRunner<P> where
 }
 
 
-pub type ReactorRunner = Runner<ReactorServer>;
+pub type SyncReactorRunner = SyncRunner<ReactorServer>;
 
 
 /*
