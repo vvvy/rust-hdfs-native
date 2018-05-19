@@ -328,7 +328,7 @@ nn_codec! {
     AddBlock("addBlock")
         << AddBlockRequestProto
         >> AddBlockResponseProto
-    ;
+        ;
 }
 
 /*
@@ -451,7 +451,7 @@ fn test_g_nn_codec_handshake() {
 fn test_g_nn_codec_read_listing() {
     use util::test::*;
     extern crate env_logger;
-    env_logger::init();
+    let _ = env_logger::try_init();
 
     let mut c = RpcCodec::<NnCodecA>::null();
     let mut b =  BytesMut::with_capacity(1024);//new();

@@ -72,7 +72,10 @@ pub use protocolpb::proto::hdfs::datatransfer::{
     ClientReadStatusProto,
     ReadOpChecksumInfoProto,
     ChecksumProto,
-    PacketHeaderProto
+    PacketHeaderProto,
+    OpWriteBlockProto,
+    OpWriteBlockProto_BlockConstructionStage,
+    PipelineAckProto
 };
 
 pub use protocolpb::proto::hdfs::hdfs::{
@@ -253,14 +256,33 @@ macro_rules! pbdb {
 { OpReadBlockProto, offset, $a:tt } => { pbdbf!{ get_offset, set_offset, $a } };
 { OpReadBlockProto, len, $a:tt }=> { pbdbf!{ get_len, set_len, $a } };
 
+// (header, targets, source, stage, pipeline_size, min_bytes_rcvd, max_bytes_rcvd, latest_generation_stamp, requested_checksum, caching_strategy, storage_type, target_storage_types, allow_lazy_persist)
+{ OpWriteBlockProto, header, $a:tt }=> { pbdbf!{ get_header, set_header, $a } };
+{ OpWriteBlockProto, targets, $a:tt }=> { pbdbf!{ get_targets, set_targets, $a } };
+{ OpWriteBlockProto, source, $a:tt }=> { pbdbf!{ get_source, set_source, $a } };
+{ OpWriteBlockProto, stage, $a:tt }=> { pbdbf!{ get_stage, set_stage, $a } };
+{ OpWriteBlockProto, pipeline_size, $a:tt }=> { pbdbf!{ get_pipelineSize, set_pipelineSize, $a } };
+{ OpWriteBlockProto, min_bytes_rcvd, $a:tt }=> { pbdbf!{ get_minBytesRcvd, set_minBytesRcvd, $a } };
+{ OpWriteBlockProto, max_bytes_rcvd, $a:tt }=> { pbdbf!{ get_maxBytesRcvd, set_maxBytesRcvd, $a } };
+{ OpWriteBlockProto, latest_generation_stamp, $a:tt }=> { pbdbf!{ get_latestGenerationStamp, set_latestGenerationStamp, $a } };
+{ OpWriteBlockProto, requested_checksum, $a:tt }=> { pbdbf!{ get_requestedChecksum, set_requestedChecksum, $a } };
+{ OpWriteBlockProto, caching_strategy, $a:tt }=> { pbdbf!{ get_cachingStrategy, set_cachingStrategy, $a } };
+{ OpWriteBlockProto, storage_type, $a:tt }=> { pbdbf!{ get_storageType, set_storageType, $a } };
+{ OpWriteBlockProto, target_storage_types, $a:tt }=> { pbdbf!{ get_targetStorageTypes, set_targetStorageTypes, $a } };
+{ OpWriteBlockProto, allow_lazy_persist, $a:tt }=> { pbdbf!{ get_allowLazyPersist, set_allowLazyPersist, $a } };
+
 { ExtendedBlockProto, pool_id, $a:tt } => { pbdbf!{ get_poolId, set_poolId, $a } };
 { ExtendedBlockProto, block_id, $a:tt } => { pbdbf!{ get_blockId, set_blockId, $a } };
 { ExtendedBlockProto, generation_stamp, $a:tt } => { pbdbf!{ get_generationStamp, set_generationStamp, $a } };
 { ExtendedBlockProto, num_bytes, $a:tt } => { pbdbf!{ get_numBytes, set_numBytes, $a } };
 
-{ BlockOpResponseProto, status, $a:tt } => { pbdbf!{ get_status, set_status, $a } };
-{ BlockOpResponseProto, read_op_checksum_info, $a:tt } => { pbdbf!{ get_readOpChecksumInfo, set_readOpChecksumInfo, $a } };
-{ BlockOpResponseProto, message, $a:tt } => { pbdbf!{ get_message, set_message, $a } };
+// (status, first_bad_link, checksum_response, read_op_checksum_info, message, short_circuit_access_version)
+{ BlockOpResponseProto, status, $a:tt }=> { pbdbf!{ get_status, set_status, $a } };
+{ BlockOpResponseProto, first_bad_link, $a:tt }=> { pbdbf!{ get_firstBadLink, set_firstBadLink, $a } };
+{ BlockOpResponseProto, checksum_response, $a:tt }=> { pbdbf!{ get_checksumResponse, set_checksumResponse, $a } };
+{ BlockOpResponseProto, read_op_checksum_info, $a:tt }=> { pbdbf!{ get_readOpChecksumInfo, set_readOpChecksumInfo, $a } };
+{ BlockOpResponseProto, message, $a:tt }=> { pbdbf!{ get_message, set_message, $a } };
+{ BlockOpResponseProto, short_circuit_access_version, $a:tt }=> { pbdbf!{ get_shortCircuitAccessVersion, set_shortCircuitAccessVersion, $a } };
 
 { ClientOperationHeaderProto, client_name, $a:tt} => { pbdbf!{ get_clientName, set_clientName, $a } };
 { ClientOperationHeaderProto, base_header, $a:tt} => { pbdbf!{ get_baseHeader, set_baseHeader, $a } };
@@ -281,6 +303,10 @@ macro_rules! pbdb {
 { ChecksumProto, type, $a:tt } => { pbdbf!{ get_field_type, set_field_type, $a } };
 { ChecksumProto, bytes_per_checksum, $a:tt } => { pbdbf!{ get_bytesPerChecksum, set_bytesPerChecksum, $a } };
 
+// (seqno, status, downstream_ack_time_nanos)
+{ PipelineAckProto, seqno, $a:tt }=> { pbdbf!{ get_seqno, set_seqno, $a } };
+{ PipelineAckProto, status, $a:tt }=> { pbdbf!{ get_status, set_status, $a } };
+{ PipelineAckProto, downstream_ack_time_nanos, $a:tt }=> { pbdbf!{ get_downstreamAckTimeNanos, set_downstreamAckTimeNanos, $a } };
 }
 
 #[macro_export]

@@ -37,7 +37,6 @@ macro_rules! app_error {
     {nn $e:expr} => { Error::Namenode(Cow::from($e)) };
     {dt $s:expr, $m:expr} => { Error::DataTransfer($s, $m.to_owned()) };
     {unreachable} => { Error::Other(Cow::from("got to an unreachable point in code")) };
-    //{other $e:expr, $($es:expr),+} => { Error::Other(Cow::from(format!($e, $($es),+))) };
     {other $e:expr} => { Error::Other(Cow::from($e)) };
     {other $($es:expr),+} => { Error::Other(Cow::from(format!($($es),+))) };
 }

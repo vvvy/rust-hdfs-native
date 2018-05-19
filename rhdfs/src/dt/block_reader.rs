@@ -3,71 +3,15 @@ use std::io::Write;
 use std::fmt;
 use std::fmt::Debug;
 
-use byteorder::{ByteOrder, BigEndian};
-use crc::crc32;
-
 use super::codec::{DtReq, DtRsp, OpBlockReadMessage};
 use super::packet::BlockDataPacket;
+use super::checksum::*;
 use super::*;
 use protobuf_api::*;
 use *;
 
 //--------------------------------------------------------------------------------------------------
 
-trait ChecksumValidator: Send + Debug {
-    fn is_trivial(&self) -> bool;
-    fn is_checksum_ok(&self, data: &[u8], sums: &[u8]) -> bool;
-    //fn eval(&self, data: &[u8], sums: &mut [u8]);
-}
-
-#[derive(Debug)]
-struct CVTrivial;
-
-impl ChecksumValidator for CVTrivial {
-    fn is_trivial(&self) -> bool { true }
-    fn is_checksum_ok(&self, _data: &[u8], _sums: &[u8]) -> bool {
-        true
-    }
-    //fn eval(&self, data: &[u8], sums: &mut [u8]) { }
-}
-
-struct CVCRC32 {
-    bytes_per_checksum: usize,
-    algo: fn(&[u8]) -> u32
-}
-
-impl Debug for CVCRC32 {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("CVCRC32")
-            .field("bytes_per_checksum", &self.bytes_per_checksum)
-            .finish()
-    }
-}
-
-impl ChecksumValidator for CVCRC32 {
-    fn is_trivial(&self) -> bool { false }
-    fn is_checksum_ok(&self, data: &[u8], sums: &[u8]) -> bool {
-        let idata = data.chunks(self.bytes_per_checksum);
-        let isums = sums.chunks(4); //size of checksum
-        idata
-            .zip(isums)
-            .find(|&(d, s)| (self.algo)(d) != BigEndian::read_u32(s))
-            .is_none()
-    }
-    /*fn eval(&self, data: &[u8], sums: &mut [u8]) {
-        let idata = data.chunks(self.bytes_per_checksum);
-        let b = BytesMut::f
-    }*/
-}
-
-impl CVCRC32 {
-    fn new_crc32(bytes_per_checksum: usize) -> CVCRC32 {
-        CVCRC32 { bytes_per_checksum, algo: crc32::checksum_ieee }
-    }
-    fn new_crc32c(bytes_per_checksum: usize) -> CVCRC32 {
-        CVCRC32 { bytes_per_checksum, algo: crc32::checksum_castagnoli }
-    }
-}
 
 //--------------------------------------------------------------------------------------------------
 //TODO: error handling
@@ -250,16 +194,19 @@ impl<W> ProtocolFsm for ReadBlock<W> where W: Write + Send + Debug + 'static {
                     let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
                     pfsm!(return error(app_error!(dt s, m)) / goto ReadBlock::End(brs))
                 },
-            (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::Packet(pkt))) =>
+            (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::Packet(pkt, is_last))) =>
                 match pt.apply(pkt) {
-                    Ok(pt) => pfsm!(wait / goto ReadBlock::Packet(pt)),
-                    Err((e, pt)) => pfsm!(return error(e) / goto ReadBlock::End(pt.decons().1))
+                    Ok(pt) =>
+                        if is_last {
+                            let (s, rbs) = pt.decons();
+                            let crs = pb_cons!(ClientReadStatusProto, status: s);
+                            pfsm!(send(DtReq::ClientReadStatus(crs)) / goto ReadBlock::ClientReadStatusSendWait(rbs))
+                        } else {
+                            pfsm!(wait / goto ReadBlock::Packet(pt))
+                        },
+                    Err((e, pt)) =>
+                        pfsm!(return error(e) / goto ReadBlock::End(pt.decons().1))
                 },
-            (ReadBlock::Packet(pt), DtRsp::ReadBlock(OpBlockReadMessage::End)) => {
-                let (s, rbs) = pt.decons();
-                let crs = pb_cons!(ClientReadStatusProto, status: s);
-                pfsm!(send(DtReq::ClientReadStatus(crs)) / goto ReadBlock::ClientReadStatusSendWait(rbs))
-            }
             //abnormal conditions
             (ReadBlock::Init(_, brs), ev) =>
                 pfsm!(return error(app_error!(other "Unexpected s/e Init/{:?}", ev)) / goto ReadBlock::End(brs)),
@@ -299,8 +246,8 @@ fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, brs: BlockRead
 fn test_read_block_simple() {
     use util::test::ptk::*;
 
-    //extern crate env_logger;
-    //env_logger::init();
+    extern crate env_logger;
+    let _ = env_logger::try_init();
 
     let t = spawn_test_server("127.0.0.1:60010", test_script! {
        //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05

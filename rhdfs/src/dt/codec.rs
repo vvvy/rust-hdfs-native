@@ -8,7 +8,7 @@ use byteorder::BigEndian;
 
 
 use *;
-use super::packet::{BlockDataPacket, PacketDecoder};
+use super::packet::{BlockDataPacket, PacketDecoder, PacketEncoder};
 use protobuf_api::*;
 use codec_tools::*;
 
@@ -51,21 +51,34 @@ fn encode_generic_op<PDU: PduSer>(op: Op, pdu: PDU, dst: &mut BytesMut) -> Resul
 #[derive(Debug)]
 pub enum OpBlockReadCodec {
     Head(PduDecoder<VarIntU32Decoder, BlockOpResponseProto>),
-    Chunk(PacketDecoder),
-    End
+    Chunk(PacketDecoder)
 }
 
 #[derive(Debug, PartialEq)]
 pub enum OpBlockReadMessage {
+    /// `Initial(has_data, m)`
     Initial(bool, BlockOpResponseProto),
-    Packet(BlockDataPacket),
-    End
+    /// `Packet(m, is_last)`
+    Packet(BlockDataPacket, bool)
 }
 
 fn has_data(borp: &BlockOpResponseProto) -> bool {
     pb_decons!(BlockOpResponseProto, borp, status) == DtStatus::SUCCESS
 }
 
+/// A generalization of `IoResult<Option<R>>`, adding `ReadyLast` variant signaling to end streaming
+/// mode and return to `Null` topleve mode
+#[derive(Debug)]
+enum DecoderResult<M> {
+    /// Message decoding complete, and this is not the last message in the streaming sequence
+    ReadyNotLast(M),
+    /// Message decoding complete, and this is the last message in the streaming sequence
+    ReadyLast(M),
+    /// Message decoding incomplete
+    NotReady,
+    /// Message decoding error
+    Err(Error),
+}
 
 impl OpBlockReadCodec {
     pub fn new() -> OpBlockReadCodec {
@@ -80,48 +93,127 @@ impl OpBlockReadCodec {
     /// ```
     /// Chunks are Data transfer packets
 
-    fn decode(&mut self, src: &mut BytesMut) -> IoResult<Option<OpBlockReadMessage>> {
+    fn decode(&mut self, src: &mut BytesMut) -> DecoderResult<OpBlockReadMessage> {
         use self::OpBlockReadCodec as O;
+        use self::DecoderResult as R;
         use util::*;
 
         logging_switch_state_f("OpBlockReadCodec", self,
                                |s| match s {
                                    &mut O::Head(ref mut rdr) =>
                                        match rdr.decode(src) {
-                                           Ok(Some(w)) => SnV::SV(
+                                           Ok(Some(w)) => if has_data(&w) {
+                                               SnV::SV(
                                                O::Chunk(PacketDecoder::new()),
-                                               Ok(Some(OpBlockReadMessage::Initial(has_data(&w), w)))
-                                           ),
-                                           Ok(None) => SnV::V(Ok(None)),
-                                           Err(e) => SnV::V(Err(e))
+                                               R::ReadyNotLast(OpBlockReadMessage::Initial(true, w))
+                                               )
+                                           } else  {
+                                               SnV::V(R::ReadyLast(OpBlockReadMessage::Initial(false, w)))
+                                           },
+                                           Ok(None) => SnV::V(R::NotReady),
+                                           Err(e) => SnV::V(R::Err(e))
                                        },
                                    &mut O::Chunk(ref mut rdr) =>
                                        match rdr.decode(src) {
-                                           Ok(Some(w)) => SnV::SV(
-                                               if w.is_last() { O::End } else { O::Chunk(PacketDecoder::new()) },
-                                               Ok(Some(OpBlockReadMessage::Packet(w))),
-                                           ),
-                                           Ok(None) => SnV::V(Ok(None)),
-                                           Err(e) => SnV::V(Err(e))
-                                       },
-                                   &mut O::End =>
-                                       SnV::V(Ok(Some(OpBlockReadMessage::End)))
+                                           Ok(Some(w)) => if w.is_last() {
+                                               SnV::V(R::ReadyLast(OpBlockReadMessage::Packet(w, true)))
+                                           } else {
+                                               SnV::SV(
+                                                   O::Chunk(PacketDecoder::new()),
+                                                   R::ReadyNotLast(OpBlockReadMessage::Packet(w, false))
+                                               )
+                                           },
+                                           Ok(None) => SnV::V(R::NotReady),
+                                           Err(e) => SnV::V(R::Err(e))
+                                       }
                                }
-        ).c_err()
+        )
+    }
+}
+
+
+#[derive(Debug)]
+pub enum OpBlockWriteCodec {
+    Head(PduDecoder<VarIntU32Decoder, BlockOpResponseProto>),
+    Ack(PduDecoder<VarIntU32Decoder, PipelineAckProto>, i64)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum OpBlockWriteMessage {
+    Initial(bool, BlockOpResponseProto),
+    Ack(PipelineAckProto)
+}
+
+
+const UNKOWN_SEQNO: i64 = -1;
+
+impl OpBlockWriteCodec {
+    pub fn new() -> OpBlockWriteCodec {
+        OpBlockWriteCodec::Head(decoder::varint_u32())
     }
 
+    /// The initial response from a datanode, in the case of reads and writes:
+    /// ```text
+    /// +-----------------------------------------------------------+
+    /// |  varint length + BlockOpResponseProto                     |
+    /// +-----------------------------------------------------------+
+    /// ```
+    /// Chunks are Data transfer packets
+
+    fn decode(&mut self, src: &mut BytesMut) -> DecoderResult<OpBlockWriteMessage> {
+        use self::OpBlockWriteCodec as O;
+        use self::DecoderResult as R;
+        use util::*;
+
+        logging_switch_state_f("OpBlockWriteCodec", self,
+                               |s| match s {
+                                   &mut O::Head(ref mut rdr) =>
+                                       match rdr.decode(src) {
+                                           Ok(Some(w)) => if has_data(&w) {
+                                               SnV::SV(
+                                                   O::Ack(decoder::varint_u32(), UNKOWN_SEQNO),
+                                                   R::ReadyNotLast(OpBlockWriteMessage::Initial(true, w))
+                                               )
+                                           } else {
+                                               SnV::V(R::ReadyLast(OpBlockWriteMessage::Initial(false, w)))
+                                           },
+                                           Ok(None) => SnV::V(R::NotReady),
+                                           Err(e) => SnV::V(R::Err(e))
+                                       },
+                                   &mut O::Ack(ref mut rdr, last_seqno) =>
+                                       match rdr.decode(src) {
+                                           Ok(Some(w)) => if pb_decons!(PipelineAckProto, w, seqno) == last_seqno {
+                                               SnV::V(R::ReadyLast(OpBlockWriteMessage::Ack(w)))
+                                           } else {
+                                               SnV::SV(
+                                                   O::Ack(decoder::varint_u32(), last_seqno),
+                                                   R::ReadyNotLast(OpBlockWriteMessage::Ack(w))
+                                               )
+                                           },
+                                           Ok(None) => SnV::V(R::NotReady),
+                                           Err(e) => SnV::V(R::Err(e))
+                                       }
+                               }
+        )
+    }
 }
+
+
 
 #[derive(Debug)]
 pub enum DtReq {
     ReadBlock(OpReadBlockProto),
-    ClientReadStatus(ClientReadStatusProto)
+    ClientReadStatus(ClientReadStatusProto),
+    WriteBlock(OpWriteBlockProto),
+    Packet(BlockDataPacket)
 }
 
 impl DtReq {
     pub fn set_client_name(&mut self, client_name: &str) {
         match self {
             &mut DtReq::ReadBlock(ref mut orbp) => orbp.mut_header().set_clientName(client_name.to_owned()),
+            &mut DtReq::WriteBlock(ref mut owbp) => owbp.mut_header().set_clientName(client_name.to_owned()),
+            &mut DtReq::Packet(..) => (),
             &mut DtReq::ClientReadStatus(..) => ()
         }
     }
@@ -129,24 +221,15 @@ impl DtReq {
 
 #[derive(Debug)]
 pub enum DtRsp {
-    ReadBlock(OpBlockReadMessage)
+    ReadBlock(OpBlockReadMessage),
+    WriteBlock(OpBlockWriteMessage)
 }
 
-impl DtRsp {
-    fn terminates_exchange(&self) -> bool {
-        match self {
-            &DtRsp::ReadBlock(OpBlockReadMessage::Initial(has_data, _)) => !has_data,
-            &DtRsp::ReadBlock(OpBlockReadMessage::Packet(_)) => false,
-            //We assume majority are one req-one resp
-            _ => true
-
-        }
-    }
-}
-
+#[derive(Debug)]
 pub enum DtCodec {
     Null,
-    OpBlockRead(OpBlockReadCodec)
+    OpBlockRead(OpBlockReadCodec),
+    OpBlockWrite(OpBlockWriteCodec)
 }
 
 impl DtCodec {
@@ -160,14 +243,28 @@ impl Encoder for DtCodec {
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> IoResult<()> {
         let (s, e) = match item {
             DtReq::ReadBlock(orbp) => (
-                DtCodec::OpBlockRead(OpBlockReadCodec::new()),
+                Some(DtCodec::OpBlockRead(OpBlockReadCodec::new())),
                 encode_generic_op(Op::ReadBlock, orbp, dst)
             ),
 
             DtReq::ClientReadStatus(crs) => (
-                DtCodec::Null,
+                Some(DtCodec::Null),
                 encoder::varint_u32().encode(crs, dst)
             ),
+
+            DtReq::WriteBlock(owbp) => (
+                Some(DtCodec::OpBlockWrite(OpBlockWriteCodec::new())),
+                encode_generic_op(Op::WriteBlock, owbp, dst)
+            ),
+
+            DtReq::Packet(bdp) => match self {
+                &mut DtCodec::OpBlockWrite(OpBlockWriteCodec::Ack(_, ref mut seqno)) => {
+                    //update sequence number
+                    *seqno = bdp.seq_no();
+                    (None, PacketEncoder::new().encode(bdp, dst))
+                }
+                _ => return Err(app_error!(codec "Invalid codec state: {:?}/Packet({:?})", self, bdp).into())
+            }
 
             //_ => (
             //    DtCodec::Null,
@@ -175,7 +272,7 @@ impl Encoder for DtCodec {
             //),
 
         };
-        *self = s;
+        if let Some(s) = s { *self = s };
         e.c_err()
     }
 }
@@ -193,19 +290,37 @@ impl Decoder for DtCodec {
     /// Chunks are Data transfer packets
 
     fn decode(&mut self, src: &mut BytesMut) -> IoResult<Option<Self::Item>> {
-        let rv = match self {
+        use self::DecoderResult as R;
+
+        let (rv, goto_null) = match self {
             &mut DtCodec::OpBlockRead(ref mut obrc) =>
-                obrc.decode(src).map(|w| w.map(|v|
-                    DtRsp::ReadBlock(v)
-                )),
+                match obrc.decode(src) {
+                    R::ReadyNotLast(v) =>
+                        (Ok(Some(DtRsp::ReadBlock(v))), false),
+                    R::ReadyLast(v) =>
+                        (Ok(Some(DtRsp::ReadBlock(v))), true),
+                    R::NotReady =>
+                        (Ok(None), false),
+                    R::Err(e) =>
+                        (Err(e.into()), true)
+                },
+            &mut DtCodec::OpBlockWrite(ref mut obwc) =>
+                match obwc.decode(src) {
+                    R::ReadyNotLast(v) =>
+                        (Ok(Some(DtRsp::WriteBlock(v))), false),
+                    R::ReadyLast(v) =>
+                        (Ok(Some(DtRsp::WriteBlock(v))), true),
+                    R::NotReady =>
+                        (Ok(None), false),
+                    R::Err(e) =>
+                        (Err(e.into()), true)
+                },
             &mut DtCodec::Null =>
-                Err(app_error!(codec "DtCodec: invalid protocol state").into())
+                (Err(app_error!(codec "DtCodec: invalid protocol state").into()), false)
         };
         //switch state to Null once finished with decoding
-        if let &Ok(Some(ref rsp)) = &rv {
-            if rsp.terminates_exchange() {
-                *self = DtCodec::Null;
-            }
+        if goto_null {
+            *self = DtCodec::Null;
         }
         rv
     }
@@ -216,6 +331,15 @@ impl Decoder for DtCodec {
 #[test]
 fn test_block_read_codec() {
     use util::test::*;
+    use self::DecoderResult as R;
+
+    fn not_last<W>(r: R<W>) -> Option<W> {
+        match r {
+            R::ReadyNotLast(w) => Some(w),
+            _ => None
+        }
+    }
+
     let mut b = BytesMut::new();
     b.extend_from_slice(&//initial response
         "
@@ -273,8 +397,8 @@ a9:c7:c0:1b
     //1R. Ok(Some(InitialResponse(status: SUCCESS readOpChecksumInfo {checksum {type: CHECKSUM_CRC32C bytesPerChecksum: 512} chunkOffset: 0})))
     //println!("1R. {:?}", r);
     assert_eq!(
-        r.ok(),
-        Some(Some(OpBlockReadMessage::Initial(true, pb_cons!(BlockOpResponseProto,
+        not_last(r),
+        Some(OpBlockReadMessage::Initial(true, pb_cons!(BlockOpResponseProto,
             status: DtStatus::SUCCESS,
             read_op_checksum_info: pb_cons!(ReadOpChecksumInfoProto,
                 checksum: pb_cons!(ChecksumProto,
@@ -283,7 +407,7 @@ a9:c7:c0:1b
                 ),
                 chunk_offset: 0
             )
-        ))))
+        )))
     );
 
     //2C. Chunk(PacketDecoder { inner: H(FixedSizeDecoder { sz: 6, pdu_type: PhantomData }, FnTailF { f: 0x7ff7e37d10b0 }) })
@@ -303,8 +427,8 @@ a9:c7:c0:1b
     //2R. Ok(Some(Packet(BlockDataPacket { header: offsetInBlock: 0 seqno: 0 lastPacketInBlock: false dataLen: 5, checksum: b"\xa9\xc7\xc0\x1b", data: b"ABCD\n" })))
     //println!("2R. {:?}", r);
     assert_eq!(
-        r.ok(),
-        Some(Some(
+        not_last(r),
+        Some(
             OpBlockReadMessage::Packet(BlockDataPacket {
                 header: pb_cons!(PacketHeaderProto,
                     offset_in_block: 0,
@@ -314,9 +438,8 @@ a9:c7:c0:1b
                 ),
                 checksum: BytesMut::from(vec![0xa9, 0xc7, 0xc0, 0x1b]),
                 data: BytesMut::from("ABCD\n")
-            })
-        ))
-
+            }, false)
+        )
     );
 
     //3C. Chunk(PacketDecoder { inner: H(FixedSizeDecoder { sz: 6, pdu_type: PhantomData }, FnTailF { f: 0x7ff7e37d10b0 }) })

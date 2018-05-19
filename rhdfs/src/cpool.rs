@@ -360,7 +360,7 @@ impl<S> SyncRunner<S> {
     pub fn exec<R, U>(&mut self, rf: BF<R, U>) -> StdResult<R, U> {
         use futures::future::Either;
 
-        let s = std::mem::replace(&mut self.s, None);
+        let s = self.s.take();
 
         let (r, s) = match s {
             Some(srv) =>

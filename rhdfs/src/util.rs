@@ -308,8 +308,10 @@ pub mod test {
         }
 
         fn expect(conn: &mut TcpStream, e: Vec<u8>) {
+
             let mut v = vector_of_size(e.len());
             let r = conn.read_exact(&mut v);
+            trace!("ptk: expect: received {}", HexSlice(&v));
             assert!(r.is_ok());
             assert_eq!(v, e);
         }

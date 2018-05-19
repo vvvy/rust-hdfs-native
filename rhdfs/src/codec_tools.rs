@@ -331,7 +331,7 @@ impl<H, TI> TailF<H, FixedSizeDecoder<TI>> for FixedSizeDecoderTailF<H::Item> wh
     }
 }
 
-pub type PduDecoder<H: Decoder, TI> = PairDecoder<H, FixedSizeDecoder<TI>, FixedSizeDecoderTailF<H::Item>>;
+pub type PduDecoder<H, TI> = PairDecoder<H, FixedSizeDecoder<TI>, FixedSizeDecoderTailF<<H as Decoder>::Item>>;
 pub fn pdu_decoder<H, TI>(h: H, f: fn(H::Item) -> usize) -> PduDecoder<H, TI>
 where
     H: Decoder,
@@ -357,12 +357,12 @@ pub fn pdu_pair_decoder<HI, TI>() -> PduPairDecoder<HI, TI>
 }
 
 //--------------------------------------------------------------------------------------------------
-
 pub struct FixedSizeEncoder<U> {
     pdu_type: PhantomData<U>
 }
 
 impl<I: PduSer> FixedSizeEncoder<I> {
+    pub fn new() -> FixedSizeEncoder<I> { FixedSizeEncoder { pdu_type: PhantomData } }
     pub fn serialized_len(item: &mut I) -> usize { item.serialized_len() }
 }
 
@@ -379,6 +379,12 @@ pub struct PairEncoder<H, T> where H: Encoder, T: Encoder {
     h: H,
     t: T,
     f: fn(&mut T::Item) -> Result<H::Item>
+}
+
+impl <H, T> PairEncoder<H, T> where H: Encoder, T: Encoder {
+    pub fn new(h: H, t: T, f: fn(&mut T::Item) -> Result<H::Item>) -> PairEncoder<H, T> {
+        PairEncoder { h, t, f }
+    }
 }
 
 impl<H, T> Encoder for PairEncoder<H, T> where
@@ -438,13 +444,26 @@ impl<HI, TI> Encoder for PduPairEncoder<HI, TI> where
     }
 }
 
-pub fn elen_varint_u32(n: usize) -> Result<u32> {
+#[inline]
+pub fn checked_usize_to_u32(n: usize, context: &str) -> Result<u32> {
     if n <= u32::max_value() as usize {
         Ok(n as u32)
     } else {
-        Err(app_error!{ codec "varintu32: length overflow" })
+        Err(app_error!(codec "{}: length overflow", context))
     }
 }
+
+#[inline]
+pub fn checked_usize_to_u16(n: usize, context: &str) -> Result<u16> {
+    if n <= u16::max_value() as usize {
+        Ok(n as u16)
+    } else {
+        Err(app_error!(codec "{}: length overflow", context))
+    }
+}
+
+
+pub fn elen_varint_u32(n: usize) -> Result<u32> { checked_usize_to_u32(n, "varintu32") }
 
 pub fn elen_u32(n: usize) -> Result<U32W> {
     if n <= u32::max_value() as usize {
