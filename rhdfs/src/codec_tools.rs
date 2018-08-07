@@ -300,7 +300,7 @@ impl<H, T, F> Decoder for PairDecoder<H, T, F> where
     type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        logging_fsm_turn("PairDecoder", self, |s| match s {
+        fsm_turn_t(module_path!(), self, |s| match s {
             &mut PairDecoder::H(ref mut h, ref f) =>
                 match h.decode(src) {
                     Ok(Some(hi)) => match f.tail_f(hi) {

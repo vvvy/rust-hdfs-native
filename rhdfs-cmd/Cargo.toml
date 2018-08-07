@@ -5,6 +5,7 @@ authors = ["Valery Vybornov <vvybornov@gmail.com>"]
 
 [dependencies]
 rhdfs = { path = "../rhdfs" }
+futures = "0.1"
 log = "0.4"
 env_logger = "0.5"
 chrono = "0.4"

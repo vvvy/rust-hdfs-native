@@ -16,6 +16,7 @@ impl Default for Common {
     }
 }
 
+#[derive(Debug)]
 pub struct GetListing {
     pub src: Vec<String>,
     pub need_location: bool

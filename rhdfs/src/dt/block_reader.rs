@@ -1,4 +1,4 @@
-
+/*
 use std::io::Write;
 use std::fmt;
 use std::fmt::Debug;
@@ -108,7 +108,7 @@ impl<W: Write> BlockReadTracker<W> {
     }
 
     fn remote_op(&mut self, p: &BlockDataPacket) -> Result<()> {
-        let (seqno, offset) = pb_decons!(PacketHeaderProto, p.header, seqno, offset_in_block);
+        let (seqno, offset) = pb_get!(PacketHeaderProto, p.header, seqno, offset_in_block);
         let _ = self.check_sequencing(seqno, offset)?;
         let _ = self.validate_checksums(&p.data, &p.checksum)?;
         self.adjust_sequencing(p.data.len());
@@ -227,22 +227,12 @@ fn build_block_read_tracker<W: Write>(borp: BlockOpResponseProto, brs: BlockRead
        pb_decons!(BlockOpResponseProto, borp, read_op_checksum_info);
    let (checksum, _chunk_offset) =
        pb_decons!(ReadOpChecksumInfoProto, roci, checksum, chunk_offset);
-   let (ctype, bpc) =
-       pb_decons!(ChecksumProto, checksum, type, bytes_per_checksum);
-   let ckalg: Box<ChecksumValidator> =
-       match if bpc == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
-           ChecksumTypeProto::CHECKSUM_NULL =>
-               Box::new(CVTrivial),
-           ChecksumTypeProto::CHECKSUM_CRC32 =>
-               Box::new(CVCRC32::new_crc32(bpc as usize)),
-           ChecksumTypeProto::CHECKSUM_CRC32C =>
-               Box::new(CVCRC32::new_crc32c(bpc as usize))
-       };
-   BlockReadTracker::new(brs, ckalg)
+   BlockReadTracker::new(brs, new_checksum(checksum))
 }
 
 
 #[test]
+#[ignore]
 fn test_read_block_simple() {
     use util::test::ptk::*;
 
@@ -308,3 +298,4 @@ fn test_read_block_simple() {
     //-----------------------------------
     let _ = t.join().unwrap();
 }
+*/

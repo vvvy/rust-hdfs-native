@@ -173,7 +173,7 @@ impl<A> Encoder for RpcCodec<A> where
     type Error = IoError;
 
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> IoResult<()> {
-        logging_switch_state_f("NnCodec::encode", self, |s| match s {
+        switch_state_t(module_path!(), self, |s| match s {
             &mut RpcCodec::Uninitialized =>
                 SnV::SV(RpcCodec::Null,
                         if let RpcReq::Handshake(hcx) = item {
@@ -206,12 +206,16 @@ impl<A> Decoder for RpcCodec<A> where
     type Item = RpcRsp<A::R>;
     type Error = IoError;
     fn decode(&mut self, src: &mut BytesMut) -> IoResult<Option<Self::Item>> {
-        logging_switch_state_f("RpcCodec::decode", self, |s| match s {
-            &mut RpcCodec::Request(ref mut s) =>
-                dresult_c(s.decode(src), |x| x),
-            &mut ref s =>
-                SnV::SV(RpcCodec::Null, Err(app_error!(codec "decoder: invalid state {:?}", s)))
-        }).c_err()
+        if !src.is_empty() {
+            switch_state_t(module_path!(), self, |s| match s {
+                &mut RpcCodec::Request(ref mut s) =>
+                    dresult_c(s.decode(src), |x| x),
+                &mut ref s =>
+                    SnV::SV(RpcCodec::Null, Err(app_error!(codec "decoder: invalid state {:?} decoding {:?}", s, CBinary(&src))))
+            }).c_err()
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -517,7 +521,7 @@ fn test_g_nn_codec_read_listing() {
         pb_decons!(RpcResponseHeaderProto, header, call_id, status, client_id);
 
     assert_eq!(r_call_id, 0);
-    assert_eq!(r_client_id as &[u8], &client_id as &[u8]);
+    assert_eq!(&r_client_id as &[u8], &client_id as &[u8]);
     assert_eq!(r_status, RpcResponseHeaderProto_RpcStatusProto::SUCCESS);
 
 

@@ -88,7 +88,8 @@ pub use protocolpb::proto::hdfs::hdfs::{
     LocatedBlocksProto,
     LocatedBlockProto,
     DatanodeInfoProto,
-    DatanodeIDProto
+    DatanodeIDProto,
+    StorageTypeProto
 };
 
 pub use protocolpb::proto::hdfs::ClientNamenodeProtocol::{
@@ -134,7 +135,7 @@ macro_rules! pbdb {
 { GetListingRequestProto, start_after, $a:tt } => { pbdbf!{ get_startAfter, set_startAfter, $a } };
 { GetListingRequestProto, need_location, $a:tt } => { pbdbf!{ get_needLocation, set_needLocation, $a } };
 
-{ GetListingResponseProto, dir_list, $a:tt } => { pbdbf!{ get_dirList, set_dirList, $a } };
+{ GetListingResponseProto, dir_list, $a:tt } => { pbdbf!{ get_dirList, set_dirList, take_dirList, $a } };
 
 { GetBlockLocationsRequestProto, src, $a:tt }=> { pbdbf!{ get_src, set_src, $a } };
 { GetBlockLocationsRequestProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
@@ -168,61 +169,61 @@ macro_rules! pbdb {
 
 //----------------------------------------------------------------------------------------------------------------------
 //hdfs.proto
-{ DirectoryListingProto, partial_listing, $a:tt } => { pbdbf!{ get_partialListing, set_partialListing, $a } };
+{ DirectoryListingProto, partial_listing, $a:tt } => { pbdbf_rep!{ get_partialListing, set_partialListing, take_partialListing, $a } };
 { DirectoryListingProto, remaining_entries, $a:tt } => { pbdbf!{ get_remainingEntries, set_remainingEntries, $a } };
 
 { HdfsFileStatusProto, file_type, $a:tt }=> { pbdbf!{ get_fileType, set_fileType, $a } };
-{ HdfsFileStatusProto, path, $a:tt }=> { pbdbf!{ get_path, set_path, $a } };
+{ HdfsFileStatusProto, path, $a:tt }=> { pbdbf!{ get_path, set_path, take_path, $a } };
 { HdfsFileStatusProto, length, $a:tt }=> { pbdbf!{ get_length, set_length, $a } };
-{ HdfsFileStatusProto, permission, $a:tt }=> { pbdbf!{ get_permission, set_permission, $a } };
-{ HdfsFileStatusProto, owner, $a:tt }=> { pbdbf!{ get_owner, set_owner, $a } };
-{ HdfsFileStatusProto, group, $a:tt }=> { pbdbf!{ get_group, set_group, $a } };
+{ HdfsFileStatusProto, permission, $a:tt }=> { pbdbf!{ get_permission, set_permission, take_permission, $a } };
+{ HdfsFileStatusProto, owner, $a:tt }=> { pbdbf!{ get_owner, set_owner, take_owner, $a } };
+{ HdfsFileStatusProto, group, $a:tt }=> { pbdbf!{ get_group, set_group, take_group, $a } };
 { HdfsFileStatusProto, modification_time, $a:tt }=> { pbdbf!{ get_modification_time, set_modification_time, $a } };
 { HdfsFileStatusProto, access_time, $a:tt }=> { pbdbf!{ get_access_time, set_access_time, $a } };
-{ HdfsFileStatusProto, symlink, $a:tt }=> { pbdbf!{ get_symlink, set_symlink, $a } };
+{ HdfsFileStatusProto, symlink, $a:tt }=> { pbdbf!{ get_symlink, set_symlink, take_symlink, $a } };
 { HdfsFileStatusProto, block_replication, $a:tt }=> { pbdbf!{ get_block_replication, set_block_replication, $a } };
 { HdfsFileStatusProto, blocksize, $a:tt }=> { pbdbf!{ get_blocksize, set_blocksize, $a } };
-{ HdfsFileStatusProto, locations, $a:tt }=> { pbdbf!{ get_locations, set_locations, $a } };
+{ HdfsFileStatusProto, locations, $a:tt }=> { pbdbf!{ get_locations, set_locations, take_locations, $a } };
 { HdfsFileStatusProto, file_id, $a:tt }=> { pbdbf!{ get_fileId, set_fileId, $a } };
 { HdfsFileStatusProto, children_num, $a:tt }=> { pbdbf!{ get_childrenNum, set_childrenNum, $a } };
-{ HdfsFileStatusProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, $a } };
+{ HdfsFileStatusProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, take_fileEncryptionInfo, $a } };
 { HdfsFileStatusProto, storage_policy, $a:tt }=> { pbdbf!{ get_storagePolicy, set_storagePolicy, $a } };
 
 { FsPermissionProto, perm, $a:tt }=> { pbdbf!{ get_perm, set_perm, $a } };
 
 // (file_length, blocks, under_construction, last_block, is_last_block_complete, file_encryption_info)
 { LocatedBlocksProto, file_length, $a:tt }=> { pbdbf!{ get_fileLength, set_fileLength, $a } };
-{ LocatedBlocksProto, blocks, $a:tt }=> { pbdbf!{ get_blocks, set_blocks, $a } };
+{ LocatedBlocksProto, blocks, $a:tt }=> { pbdbf!{ get_blocks, set_blocks, take_blocks, $a } };
 { LocatedBlocksProto, under_construction, $a:tt }=> { pbdbf!{ get_underConstruction, set_underConstruction, $a } };
-{ LocatedBlocksProto, last_block, $a:tt }=> { pbdbf!{ get_lastBlock, set_lastBlock, $a } };
+{ LocatedBlocksProto, last_block, $a:tt }=> { pbdbf!{ get_lastBlock, set_lastBlock, take_lastBlock, $a } };
 { LocatedBlocksProto, is_last_block_complete, $a:tt }=> { pbdbf!{ get_isLastBlockComplete, set_isLastBlockComplete, $a } };
-{ LocatedBlocksProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, $a } };
+{ LocatedBlocksProto, file_encryption_info, $a:tt }=> { pbdbf!{ get_fileEncryptionInfo, set_fileEncryptionInfo, take_fileEncryptionInfo, $a } };
 
 // (b, offset, locs, corrupt, block_token, is_cached, storage_types, storage_ids)
-{ LocatedBlockProto, b, $a:tt }=> { pbdbf!{ get_b, set_b, $a } };
+{ LocatedBlockProto, b, $a:tt }=> { pbdbf!{ get_b, set_b, take_b, $a } };
 { LocatedBlockProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
-{ LocatedBlockProto, locs, $a:tt }=> { pbdbf!{ get_locs, set_locs, $a } };
+{ LocatedBlockProto, locs, $a:tt }=> { pbdbf!{ get_locs, set_locs, take_locs, $a } };
 { LocatedBlockProto, corrupt, $a:tt }=> { pbdbf!{ get_corrupt, set_corrupt, $a } };
-{ LocatedBlockProto, block_token, $a:tt }=> { pbdbf!{ get_blockToken, set_blockToken, $a } };
-{ LocatedBlockProto, is_cached, $a:tt }=> { pbdbf!{ get_isCached, set_isCached, $a } };
-{ LocatedBlockProto, storage_types, $a:tt }=> { pbdbf!{ get_storageTypes, set_storageTypes, $a } };
-{ LocatedBlockProto, storage_ids, $a:tt }=> { pbdbf!{ get_storageIDs, set_storageIDs, $a } };
+{ LocatedBlockProto, block_token, $a:tt }=> { pbdbf!{ get_blockToken, set_blockToken, take_blockToken, $a } };
+{ LocatedBlockProto, is_cached, $a:tt }=> { pbdbf!{ get_isCached, set_isCached, take_isCached, $a } };
+{ LocatedBlockProto, storage_types, $a:tt }=> { pbdbf!{ get_storageTypes, set_storageTypes, take_storageTypes, $a } };
+{ LocatedBlockProto, storage_ids, $a:tt }=> { pbdbf!{ get_storageIDs, set_storageIDs, take_storageIDs, $a } };
 
-{ DatanodeInfoProto, id, $a:tt }=> { pbdbf!{ get_id, set_id, $a } };
+{ DatanodeInfoProto, id, $a:tt }=> { pbdbf!{ get_id, set_id, take_id, $a } };
 { DatanodeInfoProto, capacity, $a:tt }=> { pbdbf!{ get_capacity, set_capacity, $a } };
 { DatanodeInfoProto, dfs_used, $a:tt }=> { pbdbf!{ get_dfsUsed, set_dfsUsed, $a } };
 { DatanodeInfoProto, remaining, $a:tt }=> { pbdbf!{ get_remaining, set_remaining, $a } };
 { DatanodeInfoProto, block_pool_used, $a:tt }=> { pbdbf!{ get_blockPoolUsed, set_blockPoolUsed, $a } };
 { DatanodeInfoProto, last_update, $a:tt }=> { pbdbf!{ get_lastUpdate, set_lastUpdate, $a } };
 { DatanodeInfoProto, xceiver_count, $a:tt }=> { pbdbf!{ get_xceiverCount, set_xceiverCount, $a } };
-{ DatanodeInfoProto, location, $a:tt }=> { pbdbf!{ get_location, set_location, $a } };
-{ DatanodeInfoProto, admin_state, $a:tt }=> { pbdbf!{ get_adminState, set_adminState, $a } };
+{ DatanodeInfoProto, location, $a:tt }=> { pbdbf!{ get_location, set_location, take_location, $a } };
+{ DatanodeInfoProto, admin_state, $a:tt }=> { pbdbf!{ get_adminState, set_adminState, take_adminState, $a } };
 { DatanodeInfoProto, cache_capacity, $a:tt }=> { pbdbf!{ get_cacheCapacity, set_cacheCapacity, $a } };
 { DatanodeInfoProto, cache_used, $a:tt }=> { pbdbf!{ get_cacheUsed, set_cacheUsed, $a } };
 
-{ DatanodeIDProto, ip_addr, $a:tt }=> { pbdbf!{ get_ipAddr, set_ipAddr, $a } };
-{ DatanodeIDProto, host_name, $a:tt }=> { pbdbf!{ get_hostName, set_hostName, $a } };
-{ DatanodeIDProto, datanode_uuid, $a:tt }=> { pbdbf!{ get_datanodeUuid, set_datanodeUuid, $a } };
+{ DatanodeIDProto, ip_addr, $a:tt }=> { pbdbf!{ get_ipAddr, set_ipAddr, take_ipAddr, $a } };
+{ DatanodeIDProto, host_name, $a:tt }=> { pbdbf!{ get_hostName, set_hostName, take_hostName, $a } };
+{ DatanodeIDProto, datanode_uuid, $a:tt }=> { pbdbf!{ get_datanodeUuid, set_datanodeUuid, take_datanodeUuid, $a } };
 { DatanodeIDProto, xfer_port, $a:tt }=> { pbdbf!{ get_xferPort, set_xferPort, $a } };
 { DatanodeIDProto, info_port, $a:tt }=> { pbdbf!{ get_infoPort, set_infoPort, $a } };
 { DatanodeIDProto, ipc_port, $a:tt }=> { pbdbf!{ get_ipcPort, set_ipcPort, $a } };
@@ -237,10 +238,10 @@ macro_rules! pbdb {
 { RpcResponseHeaderProto, call_id, $a:tt }=> { pbdbf!{ get_callId, set_callId, $a } };
 { RpcResponseHeaderProto, status, $a:tt }=> { pbdbf!{ get_status, set_status, $a } };
 { RpcResponseHeaderProto, server_ipc_version_num, $a:tt }=> { pbdbf!{ get_serverIpcVersionNum, set_serverIpcVersionNum, $a } };
-{ RpcResponseHeaderProto, exception_class_name, $a:tt }=> { pbdbf!{ get_exceptionClassName, set_exceptionClassName, $a } };
-{ RpcResponseHeaderProto, error_msg, $a:tt }=> { pbdbf!{ get_errorMsg, set_errorMsg, $a } };
+{ RpcResponseHeaderProto, exception_class_name, $a:tt }=> { pbdbf!{ get_exceptionClassName, set_exceptionClassName, take_exceptionClassName, $a } };
+{ RpcResponseHeaderProto, error_msg, $a:tt }=> { pbdbf!{ get_errorMsg, set_errorMsg, take_errorMsg, $a } };
 { RpcResponseHeaderProto, error_detail, $a:tt }=> { pbdbf!{ get_errorDetail, set_errorDetail, $a } };
-{ RpcResponseHeaderProto, client_id, $a:tt }=> { pbdbf!{ get_clientId, set_clientId, $a } };
+{ RpcResponseHeaderProto, client_id, $a:tt }=> { pbdbf!{ get_clientId, set_clientId, take_clientId, $a } };
 { RpcResponseHeaderProto, retry_count, $a:tt }=> { pbdbf!{ get_retryCount, set_retryCount, $a } };
 
 { IpcConnectionContextProto, user_info, $a:tt } => { pbdbf!{ get_userInfo, set_userInfo, $a } };
@@ -251,6 +252,13 @@ macro_rules! pbdb {
 { RequestHeaderProto, declaring_class_protocol_name, $a:tt } => { pbdbf!{ get_declaringClassProtocolName, set_declaringClassProtocolName, $a } };
 { RequestHeaderProto, client_protocol_version, $a:tt } => { pbdbf!{ get_clientProtocolVersion, set_clientProtocolVersion, $a } };
 
+//Security.proto
+// (identifier, password, kind, service)
+{ TokenProto, identifier, $a:tt }=> { pbdbf!{ get_identifier, set_identifier, $a } };
+{ TokenProto, password, $a:tt }=> { pbdbf!{ get_password, set_password, $a } };
+{ TokenProto, kind, $a:tt }=> { pbdbf!{ get_kind, set_kind, $a } };
+{ TokenProto, service, $a:tt }=> { pbdbf!{ get_service, set_service, $a } };
+
 //Datatransfer
 { OpReadBlockProto, header, $a:tt } => { pbdbf!{ get_header, set_header, $a } };
 { OpReadBlockProto, offset, $a:tt } => { pbdbf!{ get_offset, set_offset, $a } };
@@ -258,30 +266,30 @@ macro_rules! pbdb {
 
 // (header, targets, source, stage, pipeline_size, min_bytes_rcvd, max_bytes_rcvd, latest_generation_stamp, requested_checksum, caching_strategy, storage_type, target_storage_types, allow_lazy_persist)
 { OpWriteBlockProto, header, $a:tt }=> { pbdbf!{ get_header, set_header, $a } };
-{ OpWriteBlockProto, targets, $a:tt }=> { pbdbf!{ get_targets, set_targets, $a } };
+{ OpWriteBlockProto, targets, $a:tt }=> { pbdbf_rep!{ get_targets, set_targets, $a } };
 { OpWriteBlockProto, source, $a:tt }=> { pbdbf!{ get_source, set_source, $a } };
 { OpWriteBlockProto, stage, $a:tt }=> { pbdbf!{ get_stage, set_stage, $a } };
 { OpWriteBlockProto, pipeline_size, $a:tt }=> { pbdbf!{ get_pipelineSize, set_pipelineSize, $a } };
 { OpWriteBlockProto, min_bytes_rcvd, $a:tt }=> { pbdbf!{ get_minBytesRcvd, set_minBytesRcvd, $a } };
 { OpWriteBlockProto, max_bytes_rcvd, $a:tt }=> { pbdbf!{ get_maxBytesRcvd, set_maxBytesRcvd, $a } };
 { OpWriteBlockProto, latest_generation_stamp, $a:tt }=> { pbdbf!{ get_latestGenerationStamp, set_latestGenerationStamp, $a } };
-{ OpWriteBlockProto, requested_checksum, $a:tt }=> { pbdbf!{ get_requestedChecksum, set_requestedChecksum, $a } };
+{ OpWriteBlockProto, requested_checksum, $a:tt }=> { pbdbf!{ get_requestedChecksum, set_requestedChecksum, take_requestedChecksum, $a } };
 { OpWriteBlockProto, caching_strategy, $a:tt }=> { pbdbf!{ get_cachingStrategy, set_cachingStrategy, $a } };
 { OpWriteBlockProto, storage_type, $a:tt }=> { pbdbf!{ get_storageType, set_storageType, $a } };
 { OpWriteBlockProto, target_storage_types, $a:tt }=> { pbdbf!{ get_targetStorageTypes, set_targetStorageTypes, $a } };
 { OpWriteBlockProto, allow_lazy_persist, $a:tt }=> { pbdbf!{ get_allowLazyPersist, set_allowLazyPersist, $a } };
 
-{ ExtendedBlockProto, pool_id, $a:tt } => { pbdbf!{ get_poolId, set_poolId, $a } };
+{ ExtendedBlockProto, pool_id, $a:tt } => { pbdbf!{ get_poolId, set_poolId, take_poolId, $a } };
 { ExtendedBlockProto, block_id, $a:tt } => { pbdbf!{ get_blockId, set_blockId, $a } };
 { ExtendedBlockProto, generation_stamp, $a:tt } => { pbdbf!{ get_generationStamp, set_generationStamp, $a } };
 { ExtendedBlockProto, num_bytes, $a:tt } => { pbdbf!{ get_numBytes, set_numBytes, $a } };
 
 // (status, first_bad_link, checksum_response, read_op_checksum_info, message, short_circuit_access_version)
 { BlockOpResponseProto, status, $a:tt }=> { pbdbf!{ get_status, set_status, $a } };
-{ BlockOpResponseProto, first_bad_link, $a:tt }=> { pbdbf!{ get_firstBadLink, set_firstBadLink, $a } };
+{ BlockOpResponseProto, first_bad_link, $a:tt }=> { pbdbf!{ get_firstBadLink, set_firstBadLink, take_firstBadLink, $a } };
 { BlockOpResponseProto, checksum_response, $a:tt }=> { pbdbf!{ get_checksumResponse, set_checksumResponse, $a } };
-{ BlockOpResponseProto, read_op_checksum_info, $a:tt }=> { pbdbf!{ get_readOpChecksumInfo, set_readOpChecksumInfo, $a } };
-{ BlockOpResponseProto, message, $a:tt }=> { pbdbf!{ get_message, set_message, $a } };
+{ BlockOpResponseProto, read_op_checksum_info, $a:tt }=> { pbdbf!{ get_readOpChecksumInfo, set_readOpChecksumInfo, take_readOpChecksumInfo, $a } };
+{ BlockOpResponseProto, message, $a:tt }=> { pbdbf!{ get_message, set_message, take_message, $a } };
 { BlockOpResponseProto, short_circuit_access_version, $a:tt }=> { pbdbf!{ get_shortCircuitAccessVersion, set_shortCircuitAccessVersion, $a } };
 
 { ClientOperationHeaderProto, client_name, $a:tt} => { pbdbf!{ get_clientName, set_clientName, $a } };
@@ -297,7 +305,7 @@ macro_rules! pbdb {
 
 { ClientReadStatusProto, status, $a:tt } => { pbdbf!{ get_status, set_status, $a } };
 
-{ ReadOpChecksumInfoProto, checksum, $a:tt } => { pbdbf!{ get_checksum, set_checksum, $a } };
+{ ReadOpChecksumInfoProto, checksum, $a:tt } => { pbdbf!{ get_checksum, set_checksum, take_checksum, $a } };
 { ReadOpChecksumInfoProto, chunk_offset, $a:tt } => { pbdbf!{ get_chunkOffset, set_chunkOffset, $a } };
 
 { ChecksumProto, type, $a:tt } => { pbdbf!{ get_field_type, set_field_type, $a } };
@@ -311,8 +319,23 @@ macro_rules! pbdb {
 
 #[macro_export]
 macro_rules! pbdbf {
-    { $get:ident, $set:ident, { $r:expr } } => { $r.$get() };
-    { $get:ident, $set:ident, { $r:expr, $v:expr } } => { $r.$set($v) };
+    { $get:ident, $set:ident, (get($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, (take($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, $take:ident, (get($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, $take:ident, (take($r:expr)) } => { $r.$take() };
+    { $get:ident, $set:ident, (set($r:expr, $v:expr)) } => { $r.$set($v) };
+    { $get:ident, $set:ident, $take:ident, (set($r:expr, $v:expr)) } => { $r.$set($v) };
+}
+
+//`repeated` field
+#[macro_export]
+macro_rules! pbdbf_rep {
+    { $get:ident, $set:ident, (get($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, (take($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, $take:ident, (get($r:expr)) } => { $r.$get() };
+    { $get:ident, $set:ident, $take:ident, (take($r:expr)) } => { $r.$take().to_vec() };
+    { $get:ident, $set:ident, (set($r:expr, $v:expr)) } => { $r.$set(protobuf::RepeatedField::from_vec($v)) };
+    { $get:ident, $set:ident, $take:ident, (set($r:expr, $v:expr)) } => { $r.$set(protobuf::RepeatedField::from_vec($v)) };
 }
 
 #[macro_export]
@@ -321,7 +344,7 @@ macro_rules! pb_cons {
         {
             let mut r = <$t>::new();
             $(
-                pbdb!{$t, $f, {r, $v}}
+                pbdb!{$t, $f, (set(r, $v))}
             )*
             r
         }
@@ -331,12 +354,34 @@ macro_rules! pb_cons {
 #[macro_export]
 macro_rules! pb_decons {
     { $t:ident, $r:expr, $f:ident } => {
-        pbdb!{$t, $f, {$r} }
+        {
+            #[allow(unused_mut)]
+            let mut x = $r;
+            pbdb!{$t, $f, (take(x))}
+        }
+    };
+    { $t:ident, $r:expr, $($f:ident),+ } => {
+        {
+            #[allow(unused_mut)]
+            let mut x = $r;
+            (
+                $(
+                    pbdb!{$t, $f, (take(x))}
+                ),+
+            )
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! pb_get {
+    { $t:ident, $r:expr, $f:ident } => {
+        pbdb!{$t, $f, (get($r)) }
     };
     { $t:ident, $r:expr, $($f:ident),+ } => {
         (
             $(
-                pbdb!{$t, $f, {$r} }
+                pbdb!{$t, $f, (get($r)) }
             ),+
         )
     };

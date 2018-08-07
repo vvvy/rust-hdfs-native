@@ -1,81 +1,251 @@
 //! Datatransfer protocol upper level
 
-use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::fmt::Debug;
 
-use futures::{Future, Stream, Poll, Sink, Async, AsyncSink};
-use futures::future::{ok, err};
+use futures::prelude::*;
+
+use bytes::Bytes;
 
 use tokio_io::AsyncRead;
 use tokio_io::codec::Framed;
 use tokio_tcp::TcpStream;
 
 pub use log::Level::Trace as LogTrace;
-use super::codec::{DtCodec, DtReq, DtRsp};
+use super::{
+    codec::{DtCodec, DtQ, DtR, OpBlockReadMessage},
+    packet::BlockDataPacket,
+    checksum::{ChecksumValidator, new_checksum}
+};
+use protobuf_api::*;
+use proto_tools;
 use *;
 
 
-pub struct Connection {
-    io: Framed<TcpStream, DtCodec>,
-    client_name: String
+#[derive(Debug, Clone)]
+pub struct ExtendedBlock {
+    inner: ExtendedBlockProto
 }
 
-impl Stream for Connection {
-    type Item = <Framed<TcpStream, DtCodec> as Stream>::Item;
-    type Error = <Framed<TcpStream, DtCodec> as Stream>::Error;
+impl ExtendedBlock {
+    #[inline]
+    pub fn get_num_bytes(&self) -> u64 { pb_get!(ExtendedBlockProto, self.inner, num_bytes) }
+}
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.io.poll()
+impl Into<ExtendedBlockProto> for ExtendedBlock {
+    fn into(self) -> ExtendedBlockProto {
+        self.inner
     }
 }
 
-/// 'Action' part of the output of a protocol FSM event handler
+impl From<ExtendedBlockProto> for ExtendedBlock {
+    fn from(inner: ExtendedBlockProto) -> Self {
+        ExtendedBlock { inner }
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    inner: Option<TokenProto>
+}
+
+impl Token {
+    fn empty() -> Token { Token {
+        inner: None
+        //pb_cons!(TokenProto, identifier: vec![], password: vec![], kind: "".to_string(), service: "".to_string())
+    } }
+}
+
+impl Into<Option<TokenProto>> for Token {
+    fn into(self) -> Option<TokenProto> {
+        self.inner
+    }
+}
+
+impl From<TokenProto> for Token {
+    fn from(inner: TokenProto) -> Self {
+        Token { inner: Some(inner) }
+    }
+}
+
+
 #[derive(Debug)]
-pub enum ProtocolFsmResult {
-    /// Send out the message
-    Send(DtReq),
-    /// Send out the message and wait for an incoming message (full duplex mode)
-    SendAndWait(DtReq),
-    /// Wait until a message arrives from the remote end
-    Wait,
-    /// Exit the IO loop with success
-    ReturnSuccess,
-    /// Exit the IO Loop with error
-    ReturnError(Error)
+pub struct ReadBlock {
+    pub b: ExtendedBlock,
+    pub t: Token,
+    pub offset: u64,
+    pub len: u64
 }
 
-/// The macro for various protocol FSM event handler output flavors
-#[macro_export]
-macro_rules! pfsm {
-    {wait / goto $s:expr} => { (ProtocolFsmResult::Wait, $s) };
-    {send ($r:expr) / goto $s:expr} => { (ProtocolFsmResult::Send($r), $s) };
-    {return success / goto $s:expr} => { (ProtocolFsmResult::ReturnSuccess, $s) };
-    {return error ($e:expr) / goto $s:expr} => { (ProtocolFsmResult::ReturnError($e), $s) };
+#[inline]
+fn mk_read_block(rb: ReadBlock, client_name: &str) -> OpReadBlockProto {
+    let bh = match rb.t.into() {
+        Some(t) => pb_cons!(BaseHeaderProto, block: rb.b.into(), token: t),
+        None => pb_cons!(BaseHeaderProto, block: rb.b.into())
+    };
+
+    pb_cons!(OpReadBlockProto,
+           header: pb_cons!(ClientOperationHeaderProto,
+                client_name: client_name.to_owned(),
+                base_header: bh
+           ),
+           offset: rb.offset,
+           len: rb.len
+       )
 }
 
 
-
-#[macro_export]
-macro_rules! pfsm_trace {
-    {$s:expr, $e:expr, $r:expr} => {
-        if log_enabled!(target: "protocol_fsm", LogTrace) {
-            let h = format!("{:?}/{:?}", $s, $e);
-            let result = $r;
-            trace!(target: "protocol_fsm", "{} => {:?}/{:?}", h, result.0, result.1);
-            result
-        } else {
-            $r
-        }
-     };
+#[derive(Debug)]
+pub enum DtaQ {
+    ReadBlock(ReadBlock),
+    //WriteBlock(WriteBlock),
+    //Data(Bytes)
 }
 
-/// Protocol FSM event handler
-pub trait ProtocolFsm : Debug {
-    /// Idle event occurs a) upon start or b) upon successful outgoing packet transmission
-    fn idle(self) -> (ProtocolFsmResult, Self);
-    /// The event is raised upon successful incoming packet reception
-    fn incoming(self, rsp: DtRsp) -> (ProtocolFsmResult, Self);
+#[derive(Debug)]
+pub enum DtaR {
+    Data(Bytes)
+}
+
+//----------------------------------------------------------------
+
+type Action = proto_tools::Action<DtQ, DtaR>;
+type NetEvent = proto_tools::NetEvent<DtR>;
+type UserEvent = proto_tools::UserEvent<DtaQ>;
+
+#[derive(Debug)]
+enum ConnectionState {
+    Idle,
+    RbSendReq(ReadRange),
+    RbRecvInitResp(ReadRange),
+    RbStreaming(ReadStreamer),
+    RbSendFinalAck
+}
+
+impl ConnectionState {
+    #[inline]
+    fn fc_bits(a: Action, s: ConnectionState) -> (Action, ConnectionState) {
+        use self::ConnectionState as S;
+        (match &s {
+            S::Idle => proto_bits!(a, -recv, +accept, +send_complete),  //.send_complete().accept(),
+            S::RbRecvInitResp(..) | S::RbStreaming(..) => proto_bits!(a, +recv, -accept, +send_complete), //a.recv(),
+            _ => proto_bits!(a, -recv, -accept, +send_complete)
+        },
+         s)
+    }
+}
+
+struct ProtoFsm {
+    state: ConnectionState,
+    client_name: String
+}
+
+macro_rules! fsmc {
+    { send($v:expr) / $s:expr } => { ConnectionState::fc_bits(Action::z().send($v), $s) };
+    { err($v:expr) / $s:expr } => { ConnectionState::fc_bits(Action::z().err($v), $s) };
+    { err($v:expr) send($w:expr) / $s:expr } => { ConnectionState::fc_bits(Action::z().err($v).send($w), $s) };
+    { deliver($v:expr) / $s:expr } => { ConnectionState::fc_bits(Action::z().deliver($v), $s) };
+    { deliver($v:expr) send($w:expr) / $s:expr } => { ConnectionState::fc_bits(Action::z().deliver($v).send($w), $s) };
+    { / $s:expr } => { ConnectionState::fc_bits(Action::z(), $s) };
+}
+
+impl ProtoFsm {
+    fn new(client_name: String) -> ProtoFsm { ProtoFsm { state: ConnectionState::Idle, client_name } }
+}
+
+impl proto_tools::ProtoFsm for ProtoFsm {
+    type NQ = DtQ;
+    type NR = DtR;
+    type UQ = DtaQ;
+    type UR = DtaR;
+
+    fn handle_n(&mut self, ne: NetEvent) -> Action {
+        use self::ConnectionState as S;
+        use proto_tools::NetEvent as E;
+        trace!("handle_n[{}]: {:?}/{:?} => ..", self.client_name, self.state, ne);
+        let (a, s) = match (std::mem::replace(&mut self.state, ConnectionState::Idle), ne) {
+            (S::RbSendReq(rr), E::Idle) =>
+                fsmc!(/ S::RbRecvInitResp(rr)),
+            (S::RbRecvInitResp(rr), E::Incoming(DtR::ReadBlock(OpBlockReadMessage::Initial(has_data, borp)))) =>
+                if has_data {
+                    let roci =
+                        pb_decons!(BlockOpResponseProto, borp, read_op_checksum_info);
+                    let (checksum, _chunk_offset) =
+                        pb_decons!(ReadOpChecksumInfoProto, roci, checksum, chunk_offset);
+                    fsmc!(/S::RbStreaming(ReadStreamer::new(rr, new_checksum(checksum))))
+                } else {
+                    let (s, m) = pb_decons!(BlockOpResponseProto, borp, status, message);
+                    fsmc!(err(app_error!(dt s, m)) / S::Idle)
+                }
+            (S::RbStreaming(mut rs), E::Incoming(DtR::ReadBlock(OpBlockReadMessage::Packet(packet, is_last)))) => {
+                let pp = rs.process_packet(packet);
+                let client_status =  if let Err(Error::DataTransfer(dts, _)) = &pp {
+                    Some(*dts)
+                } else if is_last {
+                    Some(rs.get_success_status())
+                } else {
+                    None
+                };
+                if let Some(cs) = client_status {
+                    let crs = DtQ::ClientReadStatus(pb_cons!(ClientReadStatusProto, status: cs));
+                    match pp {
+                        Ok(bs) =>
+                            if bs.is_empty() {
+                                fsmc!(deliver(DtaR::Data(bs)) send(crs) / S::RbSendFinalAck)
+                            } else {
+                                fsmc!(err(app_error!(other "dt protocol error: last packet is not empty")) / S::Idle)
+                            }
+
+                        Err(e) => fsmc!(err(e) send(crs) / S::Idle)
+                    }
+                } else {
+                    //suppress empty Data
+                    match pp {
+                        Ok(bs) =>
+                            if !bs.is_empty() {
+                                fsmc!(deliver(DtaR::Data(bs)) / S::RbStreaming(rs))
+                            } else {
+                                fsmc!(/ S::RbStreaming(rs))
+                            }
+                        Err(e) =>
+                            fsmc!(err(e) / S::Idle)
+                    }
+                }
+            }
+            (S::RbSendFinalAck, E::Idle) =>
+                fsmc!(/ S::Idle),
+            (s, e) =>
+                fsmc!(err(app_error!(other "Invalid s/ne {:?}/{:?}", s, e)) / S::Idle)
+        };
+        trace!("handle_n[{}]: .. => {:?}/{:?}", self.client_name, a, s);
+        self.state = s;
+        a
+    }
+    fn handle_u(&mut self, ue: UserEvent) -> Action {
+        use self::ConnectionState as S;
+        use proto_tools::UserEvent as E;
+        trace!("handle_u[{}]: event {:?}", self.client_name, ue);
+        let (a, s) = match (std::mem::replace(&mut self.state, ConnectionState::Idle), ue) {
+            (S::Idle, E::Init) =>
+                fsmc!(/ S::Idle),
+            (S::Idle, E::Message(DtaQ::ReadBlock(rb))) => {
+                let transfer_range = (rb.offset as i64, (rb.offset + rb.len) as i64);
+                fsmc!(send(DtQ::ReadBlock(mk_read_block(rb, &self.client_name))) / S::RbSendReq(transfer_range))
+            }
+            (s, E::Flush) =>
+                fsmc!(/ s),
+            (s, e) =>
+                fsmc!(err(app_error!(other "Invalid s/ue {:?}/{:?}", s, e)) / S::Idle)
+        };
+        trace!("handle_u[{}]: {:?}/.. => {:?}/{:?}", self.client_name, self.state, a, s);
+        self.state = s;
+        a
+    }
+}
+
+
+pub struct Connection {
+    inner: proto_tools::ProtocolLayer<Framed<TcpStream, DtCodec>, ProtoFsm>
 }
 
 impl Connection {
@@ -83,317 +253,288 @@ impl Connection {
         trace!("Trying to connect to {}, client_name={}", addr, client_name);
         let rv =
             TcpStream::connect(addr)
-                .map(|c| Connection { io: c.framed(DtCodec::new()), client_name });
+                .map(|c| Connection {
+                    inner: proto_tools::ProtocolLayer::new(
+                        c.framed(DtCodec::new()),
+                        ProtoFsm::new(client_name)
+                    )
+                });
         Box::new(rv)
     }
 
-    #[inline]
-    fn broken_pipe_error() -> IoError {
-        IoError::new(ErrorKind::BrokenPipe, app_error!(other "broken pipe"))
-    }
+}
 
-    fn send_req(self, mut request: DtReq) -> BFI<Connection> {
-        let client_name = self.client_name;
-        request.set_client_name(&client_name);
-        Box::new(self.io.send(request).map(|c| Connection { io: c, client_name }))
-    }
-
-    fn get_resp(self) -> BFI<(DtRsp, Connection)> {
-        let rv =
-            self.into_future().and_then(|(orsp, c)|
-                match orsp {
-                    Some(r) => ok((r, c)),
-                    None => err((Connection::broken_pipe_error(), c))
-                }
-            ).map_err(|(e, _)| e);
-        Box::new(rv)
-    }
-
-    #[inline]
-    fn call(self, request: DtReq) -> BFI<(DtRsp, Connection)> {
-        Box::new(self.send_req(request).and_then(|c| c.get_resp()))
-    }
-
-    #[inline]
-    pub fn run<P>(self, p: P) -> BF<(Connection, P), (Error, P)>
-        where P: ProtocolFsm + Send +'static {
-        //Box::new(FsmRunner::new(self, p))
-        Box::new(FdxFsmRunner::new(self, p))
+impl Stream for Connection {
+    type Item = DtaR;
+    type Error = Error;
+    fn poll(&mut self) -> Result<Async<Option<DtaR>>> {
+        self.inner.poll()
     }
 }
 
-enum FsmRunner<P> {
-    Init(Connection, P),
-    Send(P, BFI<Connection>),
-    Wait(P, BFI<(DtRsp, Connection)>),
-    Null
-}
+impl Sink for Connection {
+    type SinkItem = DtaQ;
+    type SinkError = Error;
+    fn start_send(&mut self, req: DtaQ) -> Result<AsyncSink<DtaQ>> {
+        self.inner.start_send(req)
+    }
 
-type FRR<P> = StdResult<Async<(Connection, P)>, (Error, P)>;
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        self.inner.poll_complete()
+    }
 
-impl<P> Future for FsmRunner<P>
-    where P: ProtocolFsm + Send +'static {
-    type Item = (Connection, P);
-    type Error = (Error, P);
-
-    fn poll(&mut self) -> FRR<P> {
-        #[inline]
-        fn absolutely_not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, None)  }
-
-        #[inline]
-        fn not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, Some(Ok(Async::NotReady)))  }
-
-        #[inline]
-        fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (FsmRunner::Null, Some(v)) }
-
-        fn process_result<P>(c: Connection, (r, p): (ProtocolFsmResult, P)) -> (FsmRunner<P>, Option<FRR<P>>) {
-            match r {
-                ProtocolFsmResult::Send(req) =>
-                    absolutely_not_ready(FsmRunner::Send(p, c.send_req(req))),
-                ProtocolFsmResult::SendAndWait(..) =>
-                    panic!("FsmRunner: SendAndWait not supported"),
-                ProtocolFsmResult::Wait =>
-                    absolutely_not_ready(FsmRunner::Wait(p, c.get_resp())),
-                ProtocolFsmResult::ReturnSuccess =>
-                    ready(Ok(Async::Ready((c, p)))),
-                ProtocolFsmResult::ReturnError(e) =>
-                    ready(Err((e.into(), p)))
-            }
-        }
-
-        loop {
-            let (s1, rv) = match std::mem::replace(self, FsmRunner::Null) {
-                FsmRunner::Init(c, p) => process_result(c, p.idle()),
-                FsmRunner::Send(p, mut conn_f) => match conn_f.poll() {
-                    Ok(Async::NotReady) =>
-                        not_ready(FsmRunner::Send(p, conn_f)),
-                    Ok(Async::Ready(c)) =>
-                        process_result(c, p.idle()),
-                    Err(e) =>
-                        ready(Err((e.into(), p)))
-                }
-                FsmRunner::Wait(p, mut rsp_f) => match rsp_f.poll() {
-                    Ok(Async::NotReady) =>
-                        not_ready(FsmRunner::Wait(p, rsp_f)),
-                    Ok(Async::Ready((rsp, c))) =>
-                        process_result(c, p.incoming(rsp)),
-                    Err(e) =>
-                        ready(Err((e.into(), p)))
-                }
-                FsmRunner::Null =>
-                    panic!("Unfused call to completed FsmRunner"),
-            };
-            *self = s1;
-            if let Some(v) = rv { break v }
-        }
+    fn close(&mut self) -> Result<Async<()>> {
+        self.inner.close()
     }
 }
 
-impl<P> FsmRunner<P>
-    where P: ProtocolFsm + Send +'static {
-
-    fn new(c: Connection, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
-}
 //--------------------------------------------------------------------------------------------------
+
+type ReadRange = (i64, i64);
+
 #[derive(Debug)]
-enum FsmEvent {
-    Idle,
-    Incoming(DtRsp),
-    Err(Error),
-    Success,
-    EndOfStream,
-    NOP
+struct ReadStreamer {
+    checksum: Box<ChecksumValidator>,
+    read_range: ReadRange,
+    seqno: i64,
+    offset: i64
 }
 
-/// Full-duplex FSM runner data
-struct FdxFsmRunnerData<P> {
+impl ReadStreamer {
+    fn new(read_range: ReadRange, checksum: Box<ChecksumValidator>) -> ReadStreamer {
+        ReadStreamer {
+            checksum,
+            read_range,
+            seqno: 0,
+            offset: 0,
+        }
+    }
+
+    fn check_sequencing(&mut self, seqno: i64, offset: i64) -> Result<()> {
+        if self.seqno == seqno && self.offset == offset {
+            Ok(())
+        } else if self.seqno == seqno && seqno == 0 {
+            self.offset = offset;
+            Ok(())
+        } else {
+            Err(app_error!(dt DtStatus::ERROR_INVALID, format!(
+                            "BlockReadTracker: packet sequencing error: expected s={}, o={}, got s={}, o={}",
+                            self.seqno, self.offset, seqno, offset
+                            )))
+        }
+    }
+
+    #[inline]
+    fn adjust_sequencing(&mut self, dlen: usize) {
+        self.seqno += 1;
+        self.offset += dlen as i64;
+    }
+
+    fn validate_checksums(&self, data: &[u8], checksums: &[u8]) -> Result<()> {
+        if self.checksum.is_checksum_ok(data, checksums) {
+            Ok(())
+        } else {
+            Err(app_error!(dt DtStatus::ERROR_CHECKSUM, "BlockReadTracker: checksum error"))
+        }
+    }
+
+    fn process_packet(&mut self, p: BlockDataPacket) -> Result<Bytes> {
+        let (seqno, offset) = pb_decons!(PacketHeaderProto, p.header, seqno, offset_in_block);
+        let _ = self.check_sequencing(seqno, offset)?;
+        let _ = self.validate_checksums(&p.data, &p.checksum)?;
+        self.adjust_sequencing(p.data.len());
+        Ok(crop_bytes(p.data.freeze(), offset, self.read_range))
+    }
+
+    fn get_success_status(&self) -> DtStatus {
+        if self.checksum.is_trivial() { DtStatus::SUCCESS } else { DtStatus::CHECKSUM_OK }
+    }
+}
+
+/// Crops `Bytes` so that it fits into a target range.
+/// `bs` is source `Bytes` where the source segment `[sl, sl + bs.len())` map, and `[rl, ru)`
+/// is the target (bounding) range. Returns cropped `bs` (a result of intersection of the source
+/// segment and the target range). The return value is empty if they do not intersect.
+fn crop_bytes(mut b: Bytes, sl: i64, (rl, ru): (i64, i64)) -> Bytes {
+    let su = sl + b.len() as i64;
+    if su <= ru { //SR
+        if rl <= sl { //rsSR
+            //sS
+            b
+        } else if su <= rl { //Sr => sSrR
+            Bytes::new()
+        } else { //srSR
+            //rS: cut off initial r - s bytes
+            b.advance((rl - sl) as usize);
+            b
+        }
+    } else { //RS
+        if ru <= sl { //Rs => rRsS
+            Bytes::new()
+        } else if rl <= sl { //rs => rsRS
+            //sR: cut off trailing bytes to the length R - s
+            b.truncate((ru - sl) as usize);
+            b
+        } else { //srRS
+            //rR: advance by r - s bytes and truncate to R - r bytes
+            b.advance((rl - sl) as usize);
+            b.truncate((ru - rl) as usize);
+            b
+        }
+    }
+}
+
+#[test]
+fn test_crop_bytes() {
+    let sl = 10; //,20)
+    let b = Bytes::from_static(&[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+
+    macro_rules! asrt {
+        ($b:expr, $rlru:expr => $($n:expr),+) => { assert_eq!(crop_bytes($b.clone(), sl, $rlru), Bytes::from_static(&[$($n),+])); };
+        ($b:expr, $rlru:expr => ) => { assert_eq!(crop_bytes($b.clone(), sl, $rlru), Bytes::new()); };
+    }
+
+    asrt!(b, (0, 30) => 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+    asrt!(b, (0, 20) => 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+    asrt!(b, (10, 30) => 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+    asrt!(b, (10, 20) => 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+    asrt!(b, (20, 30) => );
+    asrt!(b, (0, 10) => );
+    asrt!(b, (15, 25) => 15, 16, 17, 18, 19);
+    asrt!(b, (5, 15) => 10, 11, 12, 13, 14);
+    asrt!(b, (11, 12) => 11);
+    asrt!(b, (11, 13) => 11, 12);
+
+    let b = Bytes::from_static(&[10]);
+
+    asrt!(b, (0, 30) => 10);
+    asrt!(b, (10, 11) => 10);
+    asrt!(b, (20, 30) => );
+    asrt!(b, (0, 10) => );
+    asrt!(b, (15, 25) => );
+    asrt!(b, (5, 15) => 10);
+    asrt!(b, (11, 12) => );
+    asrt!(b, (11, 13) => );
+
+    let b = Bytes::new();
+    asrt!(b, (0, 10) => );
+
+}
+
+use std::io::{Read, ErrorKind};
+
+pub struct AsyncReadBlock {
     c: Connection,
-    p: P,
-    sending: bool,
-    receiving: bool
+    b: Bytes
 }
 
-impl<P> FdxFsmRunnerData<P> where P: ProtocolFsm + Send +'static {
-    #[inline]
-    fn new(c: Connection, p: P) -> FdxFsmRunnerData<P> {
-        FdxFsmRunnerData { c, p, sending: false, receiving: false }
-    }
-
-    #[inline]
-    fn start_send(mut self, mut m: DtReq, receive: bool) -> StdResult<Self, (Error, P)> {
-        if !self.sending {
-            m.set_client_name(&self.c.client_name);
-            match self.c.io.start_send(m) {
-                Ok(AsyncSink::Ready) =>
-                    Ok(Self { sending: true, receiving: receive, ..self }),
-                Ok(AsyncSink::NotReady(w)) =>
-                    Err((app_error!(other "Overlapped sending on {:?}", w), self.p)),
-                Err(e) =>
-                    Err((e.into(), self.p))
-            }
+impl AsyncReadBlock {
+    pub fn new(c: Connection) -> AsyncReadBlock { AsyncReadBlock { c, b: Bytes::new() } }
+    pub fn decons(self) -> (Connection, Bytes) { (self.c, self.b) }
+    fn fill_buffer(&mut self, buf: &mut [u8]) -> usize {
+        if self.b.is_empty() {
+            0
         } else {
-            Err((app_error!(other "Overlapped sending"), self.p))
+            let l = self.b.len().min(buf.len());
+            let b = self.b.split_to(l);
+            buf[0..l].copy_from_slice(&b[..]);
+            l
         }
     }
+}
 
-    #[inline]
-    fn start_recv(self) -> StdResult<Self, (Error, P)> {
-        Ok(Self { receiving: true, ..self })
-    }
-
-    #[inline]
-    fn into_success(self) -> (Option<Self>, FRR<P>) { (None, Ok(Async::Ready((self.c, self.p)))) }
-    #[inline]
-    fn into_nop(self) -> (Option<Self>, FRR<P>) { (Some(self), Ok(Async::NotReady)) }
-    #[inline]
-    fn into_error(self, e: Error) -> (Option<Self>, FRR<P>) { (None, Err((e, self.p))) }
-
-    fn poll_send(&mut self) -> FsmEvent {
-        if self.sending {
-            match self.c.io.poll_complete() {
-                Ok(Async::Ready(())) => {
-                    self.sending = false;
-                    FsmEvent::Idle
+impl Read for AsyncReadBlock {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        let l = self.fill_buffer(buf);
+        if l > 0 {
+            Ok(l)
+        } else {
+            match self.c.poll() {
+                Ok(Async::Ready(Some(DtaR::Data(b)))) => {
+                    self.b = b;
+                    Ok(self.fill_buffer(buf))   //if b is empty, it's over
                 }
+                Ok(Async::Ready(None)) =>
+                    Err(IoError::new(ErrorKind::BrokenPipe, app_error!(other "Premature end of input on ReadBlock"))),
                 Ok(Async::NotReady) =>
-                    FsmEvent::NOP,
+                    Err(ErrorKind::WouldBlock.into()),
                 Err(e) =>
-                    FsmEvent::Err(e.into())
-            }
-        } else {
-            FsmEvent::NOP
-        }
-    }
-
-    fn poll_send_byval(mut self) -> StdResult<(Self, FsmEvent), (Error, P)> {
-        let ev = self.poll_send();
-        Ok((self, ev))
-    }
-
-    fn poll_recv(&mut self) -> FsmEvent {
-        if self.receiving {
-            match self.c.io.poll() {
-                Ok(Async::Ready(Some(v))) => {
-                    self.receiving = false;
-                    FsmEvent::Incoming(v)
-                }
-                Ok(Async::Ready(None)) => {
-                    self.receiving = false;
-                    FsmEvent::EndOfStream
-                }
-                Ok(Async::NotReady) =>
-                    FsmEvent::NOP,
-                Err(e) =>
-                    FsmEvent::Err(e.into())
-            }
-        } else {
-            FsmEvent::NOP
-        }
-    }
-
-    fn poll_recv_byval(mut self) -> StdResult<(Self, FsmEvent), (Error, P)> {
-        let ev = self.poll_recv();
-        Ok((self, ev))
-    }
-
-    fn handle_event_int(mut self, ev: FsmEvent) -> StdResult<(Self, FsmEvent), (Error, P)> {
-        let (r, p1) = match ev {
-            FsmEvent::Idle =>
-                self.p.idle(),
-            FsmEvent::Incoming(m) =>
-                self.p.incoming(m),
-            FsmEvent::NOP | FsmEvent::EndOfStream | FsmEvent::Success | FsmEvent::Err(..) =>
-                unreachable!()
-        };
-        self.p = p1;
-        match r {
-            ProtocolFsmResult::ReturnSuccess =>
-                Ok((self, FsmEvent::Success)),
-            ProtocolFsmResult::ReturnError(e) =>
-                Err((e, self.p)),
-            ProtocolFsmResult::Send(m) =>
-                self.start_send(m, false).and_then(|s| s.poll_send_byval()),
-            ProtocolFsmResult::SendAndWait(m) =>
-                self.start_send(m, true).and_then(|s| s.poll_send_byval()),
-            ProtocolFsmResult::Wait =>
-                self.start_recv().and_then(|s| s.poll_recv_byval()),
-        }
-    }
-
-    fn handle_event(mut self, mut ev: FsmEvent) -> (Option<Self>, FRR<P>) {
-        let mut r = Ok((self, ev));
-        loop {
-            match r {
-                Ok((s, FsmEvent::NOP)) =>
-                    break s.into_nop(),
-                Ok((s, FsmEvent::Success)) =>
-                    break s.into_success(),
-                Ok((s, FsmEvent::Err(e))) =>
-                    break s.into_error(e),
-                Ok((s, FsmEvent::EndOfStream)) =>
-                    break s.into_error(app_error!(other "dt: Premature end of input stream")),
-                Ok((s, ev)) =>
-                    r = s.handle_event_int(ev),
-                Err((e, p)) =>
-                    break (None, Err((e, p)))
+                    Err(e.into())
             }
         }
     }
 }
 
-/// Full-duplex FSM runner
-enum FdxFsmRunner<P> {
-    Init(Connection, P),
-    Active(FdxFsmRunnerData<P>),
-    Null
-}
+impl AsyncRead for AsyncReadBlock { }
 
-impl<P> FdxFsmRunner<P> where P: ProtocolFsm + Send +'static {
-    fn new(c: Connection, p: P) -> FdxFsmRunner<P> {
-        FdxFsmRunner::Init(c, p)
-    }
+#[test]
+//#[ignore]
+fn test_read_block_simple() {
+    use util::test::ptk::*;
+    let host_port = "127.0.0.1:60010";
 
-    fn handle_event(&mut self, ev: FsmEvent) -> FRR<P> {
-        if let FsmEvent::NOP = ev {
-            Ok(Async::NotReady)
-        } else {
-            let (s1, rv) = match std::mem::replace(self, FdxFsmRunner::Null) {
-                FdxFsmRunner::Init(c, p) =>
-                    FdxFsmRunnerData::new(c, p).handle_event(FsmEvent::Idle),
-                FdxFsmRunner::Active(d) =>
-                    d.handle_event(ev),
-                FdxFsmRunner::Null =>
-                    panic!("invalid handle_event usage")
-            };
-            *self = s1.map_or(FdxFsmRunner::Null, |d| FdxFsmRunner::Active(d));
-            rv
-        }
-    }
-}
+    use std::io::{Cursor};
 
-impl<P> Future for FdxFsmRunner<P>
-    where P: ProtocolFsm + Send +'static {
-    type Item = (Connection, P);
-    type Error = (Error, P);
+    init_env_logger!();
 
-    fn poll(&mut self) -> FRR<P> {
-        let (e_recv, e_send) = match self {
-            FdxFsmRunner::Init(c, p) =>
-                (FsmEvent::Idle, FsmEvent::NOP),
-            FdxFsmRunner::Active(d) => {
-                let e_recv = d.poll_recv();
-                let e_send = d.poll_send();
-                (e_recv, e_send)
-            }
-            FdxFsmRunner::Null =>
-                panic!("Invalid future state: Null")
-        };
+    let t = spawn_test_server(host_port, test_script! {
+       //E 00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:20:05:12:03:61:62:63:10:00:18:05
+       expect "\
+       00:1c:51:41:0a:3b:0a:34:0a:32:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:\
+       2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:f3:87:80:80:04:18:df:0f:\
+       20:05:12:03:61:62:63:10:00:18:05",
 
-        let r_recv = self.handle_event(e_recv);
-        if let Ok(Async::NotReady) = r_recv {
-            self.handle_event(e_send)
-        } else {
-            r_recv
-        }
-    }
+       //S 0d:08:00:22:09:0a:05:08:02:10:80:04:10:00
+       send "0d:08:00:22:09:0a:05:08:02:10:80:04:10:00",
+
+       //S 00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:00:00:a9:c7:c0:1b
+       send "\
+       00:00:00:0d:00:19:09:00:00:00:00:00:00:00:00:11:00:00:00:00:00:00:00:00:18:00:25:05:00:\
+       00:00:a9:c7:c0:1b",
+
+       //S 41:42:43:44:0a
+       send "41:42:43:44:0a",
+
+       //S 00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:00:00
+       send "\
+       00:00:00:04:00:19:09:05:00:00:00:00:00:00:00:11:01:00:00:00:00:00:00:00:18:01:25:00:00:\
+       00:00",
+
+       //E 02:08:06
+       expect "02 08 06"
+    });
+
+    use std::net::ToSocketAddrs;
+    use std::borrow::Cow;
+    use futures::Future;
+
+    let addr = host_port.to_socket_addrs().unwrap().next().ok_or(app_error!(other "DN host not found")).unwrap();
+    let conn_f = Connection::connect(&addr, "abc".to_owned());
+
+    let rb = ReadBlock {
+        b: ExtendedBlock { inner: pb_cons!(ExtendedBlockProto,
+                       pool_id: "BP-1914853243-127.0.0.1-1500467607052".to_owned(),
+                       block_id: 1073742835,
+                       generation_stamp: 2015,
+                       num_bytes: 5
+                   ) },
+        t: Token::empty(),
+        offset: 0,
+        len: 5
+    };
+
+    let (cnt, _arb, cv) = conn_f
+        .and_then(|mut conn| conn.send(DtaQ::ReadBlock(rb)).map_err(|e| e.into()))
+        .and_then(|conn| tokio_io::io::copy(
+            AsyncReadBlock::new(conn),
+            Cursor::new(Vec::new())
+        ))
+        .wait()
+        .unwrap();
+
+    assert_eq!(cnt, 5);
+    let w = cv.into_inner();
+    assert_eq!(w, vec![65, 66, 67, 68, 10]);
+    //-----------------------------------
+    let _ = t.join().unwrap();
 }

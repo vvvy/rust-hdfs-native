@@ -73,27 +73,32 @@ pub enum SnV<S, V> {
 
 /// Handles `SnV`
 #[inline]
-pub fn switch_state<S, V>(s: &mut S, sr: SnV<S, V>) -> V {
+pub fn switch_state_v<S, V>(s: &mut S, sr: SnV<S, V>) -> V {
     match sr {
         SnV::SV(ns, r) => { *s = ns; r }
         SnV::V(r) => r
     }
 }
+/// Handles `SnV`, plus trace
+#[inline]
+pub fn switch_state_vt<S: Debug, V: Debug>(tgt: &'static str, s: &mut S, sr: SnV<S, V>) -> V {
+    trace!(target: tgt, "switch-state: {:?} => {:?}", s, sr);
+    switch_state_v(s, sr)
+}
 
 /// Generates (via `f`) and handles `SnV`
 #[inline]
-pub fn switch_state_f<S, V, F>(s: &mut S, f: F) -> V where F: FnOnce(&mut S) -> SnV<S, V> {
+pub fn switch_state<S, V, F>(s: &mut S, f: F) -> V where F: FnOnce(&mut S) -> SnV<S, V> {
     let snv = f(s);
-    switch_state(s, snv)
+    switch_state_v(s, snv)
 }
 
 
 /// Generates (via `f`) and handles `SnV`, plus trace
 #[inline]
-pub fn logging_switch_state_f<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, f: F) -> V where F: FnOnce(&mut S) -> SnV<S, V> {
+pub fn switch_state_t<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, f: F) -> V where F: FnOnce(&mut S) -> SnV<S, V> {
     let snv = f(s);
-    trace!(target: tgt, "switch-state: {:?} => {:?}", s, snv);
-    switch_state(s, snv)
+    switch_state_vt(tgt, s, snv)
 }
 
 //FSM handling primitives
@@ -117,7 +122,7 @@ pub fn fsm_turn<S, V, F>(s: &mut S, mut f: F) -> V where F: FnMut(&mut S) -> SV<
 }
 
 #[inline]
-pub fn logging_fsm_turn<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut f: F) -> V where F: FnMut(&mut S) -> SV<S, V> {
+pub fn fsm_turn_t<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut f: F) -> V where F: FnMut(&mut S) -> SV<S, V> {
     loop {
         let sv = f(s);
         trace!(target: tgt, "fsm_turn: {:?} => {:?}", s, sv);
@@ -128,9 +133,51 @@ pub fn logging_fsm_turn<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut
     }
 }
 
+#[macro_export]
+macro_rules! fsm_turn_tm {
+    ($s:expr, $f:expr) => {
+        loop {
+            let sv = $f;
+            trace!("fsm_turn(m): {:?} => {:?}", $s, sv);
+            match sv {
+                SV::S(ns) => $s = ns,
+                SV::V(v) => break v
+            }
+        }
+    };
+}
 
+#[derive(Debug)]
+pub enum SxV<S, V> {
+    S(S),
+    V(V),
+    SV(S, V)
+}
 
+#[inline]
+pub fn fsm_turn_x<S, V, F>(s: &mut S, mut f: F) -> V where F: FnMut(&mut S) -> SxV<S, V> {
+    loop {
+        let sv = f(s);
+        match sv {
+            SxV::S(ns) => *s = ns,
+            SxV::V(v) => break v,
+            SxV::SV(ns, v) => { *s = ns; break v }
+        }
+    }
+}
 
+#[inline]
+pub fn fsm_turn_xt<S: Debug, V: Debug, F>(tgt: &'static str, s: &mut S, mut f: F) -> V where F: FnMut(&mut S) -> SxV<S, V> {
+    loop {
+        let sv = f(s);
+        trace!(target: tgt, "fsm_turn_x: {:?} => {:?}", s, sv);
+        match sv {
+            SxV::S(ns) => *s = ns,
+            SxV::V(v) => break v,
+            SxV::SV(ns, v) => { *s = ns; break v }
+        }
+    }
+}
 
 /// Compact binary writer
 /// If a slice is longer than `T` bytes, writes only `LH` initial bytes followed by
@@ -142,6 +189,12 @@ impl<'a> CBinary<'a> {
     const T: usize = 36;
     const LH: usize = 16;
     const LT: usize = 16;
+}
+
+impl<'a> fmt::Debug for CBinary<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        <Self as fmt::Display>::fmt(self, fmt)
+    }
 }
 
 impl<'a> fmt::Display for CBinary<'a> {
@@ -203,12 +256,60 @@ impl<'a> fmt::Display for CBinary<'a> {
     }
 }
 
+#[inline]
+pub fn trace_arg_result<A: Debug, R: Debug>(comment: &'static str, a: A, f: impl Fn(A) -> R) -> R {
+    use log::Level::Trace;
+    if log_enabled!(Trace) {
+        let s_a = format!("{:?}", a);
+        let rv = f(a);
+        trace!("{}: {} -> {:?}", comment, s_a, rv);
+        rv
+    } else {
+        f(a)
+    }
+}
+
+
+macro_rules! trace_ar {
+    { $comment:expr, $a:expr, $r:expr } => { {
+        use log::Level::Trace;
+        if log_enabled!(Trace) {
+            let s_a = format!("{:?}", $a);
+            let rv = $r;
+            trace!("{}: {} -> {:?}", $comment, s_a, rv);
+            rv
+        } else {
+            $r
+        }
+    } };
+    { $comment:expr, $s:expr, $a:expr, $r:expr } => { {
+        use log::Level::Trace;
+        if log_enabled!(Trace) {
+            let (s_s, s_a) = (format!("{:?}", $s), format!("{:?}", $a));
+            let rv = $r;
+            trace!("{}: {}/{} -> {:?}/{:?}", $comment, s_s, s_a, rv, $s);
+            rv
+        } else {
+            $r
+        }
+    } };
+}
+
+
+
 //----------------
 
 #[cfg(test)]
 #[macro_use]
 pub mod test {
     use std::fmt::{Display, Formatter, Result};
+
+    macro_rules! init_env_logger {
+        () => { {
+            extern crate env_logger;
+            let _ = env_logger::try_init();
+        } };
+    }
 
     pub trait ToBytes {
         fn to_bytes(&self) -> Vec<u8>;

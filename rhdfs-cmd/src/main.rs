@@ -3,11 +3,15 @@
 #[macro_use] extern crate log;
 extern crate env_logger;
 extern crate chrono;
-
-
+extern crate futures;
 #[macro_use] extern crate rhdfs;
 
+mod util;
+
+use futures::prelude::*;
 use rhdfs::*;
+use rhdfs::hdfs::*;
+
 
 
 fn main() {
@@ -52,23 +56,19 @@ fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
     //resolve namenode host ip
     let nn = resolve_hostport(nn_hostport)?;
 
-    //TODO: move hardcoded values to config
-    let (c, s) =
-        create_reactor(
-            16,
-            std::time::Duration::new(10,0),
-            vec![(default_nn_key(), CAddr::NN(nn))],
-            nat,
-            SessionData { effective_user: cfg.effective_user.clone()  }
-        );
+    let session_data = SessionData {
+        effective_user: cfg.effective_user.clone(),
+        forced_client_id: None
+    };
 
-    let mut rr = SyncReactorRunner::new(s);
+    //TODO: move hardcoded values to config
+    let mdx = Mdx::new(1, 1, session_data,  nn, nat);
 
     match cmd {
         Command::GetListing(args) =>
-            get_listing(&mut rr, &c, args),
+            get_listing(mdx, args),
         Command::Get(args) =>
-            get(&mut rr, c, args),
+            /*get(&mut rr, c, args)*/unimplemented!(),
         Command::Version =>
             version(),
         Command::Help|Command::Null =>
@@ -89,64 +89,57 @@ fn test_perms_s() {
     assert_eq!(perms_s(0o0777), "rwxrwxrwx");
     assert_eq!(perms_s(0o0333), "-wx-wx-wx");
     assert_eq!(perms_s(0o0337), "-wx-wxrwx");
-
 }
 
-fn get_listing(r: &mut SyncReactorRunner, c: &ReactorClient, args: args::GetListing) -> Result<()> {
-    struct PSink {
-        src: Vec<String>
-    }
-
-    impl hdfs::ListingSink for PSink {
-        fn files(&mut self, fs: &[HdfsFileStatusProto], src_pos: usize, _last_in_src: bool, _last: bool) {
-            use self::chrono::prelude::*;
-
-            for f in fs {
-                let (
-                    file_type, path, length, permission, owner, group, modification_time
-                ) = pb_decons!(HdfsFileStatusProto, f,
-                    file_type, path, length, permission, owner, group, modification_time
+fn get_listing(mdx: Mdx, args: args::GetListing) -> Result<()> {
+    fn print_file(f: HdfsFileStatusProto, src: &str) {
+        use chrono::prelude::*;
+        let (
+            file_type, path, length, permission, owner, group, modification_time, symlink
+        ) = pb_decons!(HdfsFileStatusProto, f,
+                    file_type, path, length, permission, owner, group, modification_time, symlink
                 );
 
-                let mtime_dt: DateTime<Local> = Local.timestamp(modification_time as i64/ 1000 , 0);
-                let mtime = mtime_dt.format("%Y-%m-%d %H:%M").to_string();
+        let mtime_dt: DateTime<Local> = Local.timestamp(modification_time as i64/ 1000 , 0);
+        let mtime = mtime_dt.format("%Y-%m-%d %H:%M").to_string();
 
-                let perm_s = perms_s(pb_decons!(FsPermissionProto, permission, perm));
+        let perm_s = perms_s(pb_decons!(FsPermissionProto, permission, perm));
 
-                let path = String::from_utf8_lossy(path);
-                let src: &str = if src_pos < self.src.len() { &self.src[src_pos] } else { "" };
-                let sep = if src.is_empty() || src.ends_with('/') { "" } else { "/" };
+        let path = String::from_utf8_lossy(&path);
+        let sep = if src.is_empty() || src.ends_with('/') { "" } else { "/" };
 
-                match file_type {
-                    HdfsFileStatusProto_FileType::IS_DIR => println!(
-                        "d{} {} {} {} {} {} {}{}{}",
-                        perm_s, '-', owner, group, length, mtime, src, sep, path
-                    ),
-                    HdfsFileStatusProto_FileType::IS_SYMLINK => println!(
-                        "u{} {} {} {} {} {} {}{}{} ->{}",
-                        perm_s, '?', owner, group, length, mtime, src, sep, path,
-                        String::from_utf8_lossy(pb_decons!(HdfsFileStatusProto, f, symlink))
-                    ),
-                    HdfsFileStatusProto_FileType::IS_FILE => println!(
-                        "-{} {} {} {} {} {} {}{}{}",
-                        perm_s, '?', owner, group, length, mtime, src, sep, path
-                    )
-                };
-            }
+        match file_type {
+            HdfsFileStatusProto_FileType::IS_DIR => println!(
+                "d{} {} {} {} {} {} {}{}{}",
+                perm_s, '-', owner, group, length, mtime, src, sep, path
+            ),
+            HdfsFileStatusProto_FileType::IS_SYMLINK => println!(
+                "u{} {} {} {} {} {} {}{}{} ->{}",
+                perm_s, '?', owner, group, length, mtime, src, sep, path,
+                String::from_utf8_lossy(&symlink)
+            ),
+            HdfsFileStatusProto_FileType::IS_FILE => println!(
+                "-{} {} {} {} {} {} {}{}{}",
+                perm_s, '?', owner, group, length, mtime, src, sep, path
+            )
         }
     }
 
-    let src2 = args.src.clone();
-    let (_, rv) = r.exec(hdfs::get_listing(
-        c,
-        config::GetListing { src: args.src, need_location: false },
-        PSink { src: src2 }
-    )).commute();
+    args.src.into_iter().try_fold(mdx, |mdx, src| -> Result<Mdx> {
+        let (s, _) = hdfs::get_listing(mdx, src.clone(), false)
+            .forward(util::ForEachSink::<_, _, Error>::new(|fs| Ok(for file in fs { print_file(file, &src) })))
+            .wait()?;
+        Ok(s.into_inner().into_inner())
+    })?;
 
-    rv
+    Ok(())
 }
 
+
+
+
 use std::path::{Path, PathBuf};
+
 
 fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
     use std::ffi::OsStr;
@@ -201,7 +194,7 @@ fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
 
 }
 
-
+/*
 fn get(r: &mut SyncReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<()> {
     use std::fs::File;
 
@@ -219,7 +212,7 @@ fn get(r: &mut SyncReactorRunner, mut c: ReactorClient, args: args::Get) -> Resu
 
     Ok(())
 }
-
+*/
 fn version() -> ! {
     println!(
         "{} ({}) version {}",

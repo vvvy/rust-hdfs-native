@@ -1,31 +1,119 @@
 
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio_tcp::TcpStream;
-//use tokio_core::reactor::Handle;
 use tokio_io::codec::Framed;
 use tokio_io::AsyncRead;
-use futures::{Future, Stream, Poll, Sink, Async};
-use futures::future::{ok, err};
+use futures::prelude::*;
 
 use *;
 use protobuf_api::*;
 use super::codec::{NnCodec, NnQ, NnR, RpcReq, RpcRsp, HandshakeContext, OpContext};
-
-pub enum ProtocolFsmResult {
-    Send(NnQ),
-    ReturnSuccess,
-    ReturnError(Error)
+/*
+#[derive(Debug)]
+pub struct GetListingRequest {
+    pub src: String,
+    pub start_after: Vec<u8>,
+    pub need_location: bool
 }
 
-/// Protocol FSM event handler
-pub trait ProtocolFsm {
-    /// called upon start of operation
-    fn start(self) -> (ProtocolFsmResult, Self);
-    /// called upon incoming message arrival
-    fn incoming(self, NnR) -> (ProtocolFsmResult, Self);
+#[derive(Debug)]
+pub enum NnaReq {
+    GetListing(GetListingRequest)
+}
+*/
+
+#[derive(Debug)]
+pub struct NnaQ {
+    inner: NnQ
 }
 
+impl NnaQ {
+    pub fn new(inner: NnQ) -> NnaQ { NnaQ { inner } }
+}
+
+
+/*
+enum FileType {
+    IS_DIR,
+    IS_FILE,
+    IS_SYMLINK
+}
+
+pub struct HdfsFileStatus {
+    //required FileType fileType = 1;
+    file_type: FileType,
+    //required bytes path = 2;          // local name of inode encoded java UTF8
+    path: Vec<u8>,
+    //required uint64 length = 3;
+    length: u64,
+    //required FsPermissionProto permission = 4;
+
+    //required string owner = 5;
+    owner: String,
+    //required string group = 6;
+    group: String,
+    //required uint64 modification_time = 7;
+
+    required uint64 access_time = 8;
+
+    // Optional fields for symlink
+    optional bytes symlink = 9;             // if symlink, target encoded java UTF8
+
+    // Optional fields for file
+    optional uint32 block_replication = 10 [default = 0]; // only 16bits used
+    optional uint64 blocksize = 11 [default = 0];
+    optional LocatedBlocksProto locations = 12;  // suppled only if asked by client
+
+    // Optional field for fileId
+    optional uint64 fileId = 13 [default = 0]; // default as an invalid id
+    optional int32 childrenNum = 14 [default = -1];
+    // Optional field for file encryption
+    optional FileEncryptionInfoProto fileEncryptionInfo = 15;
+
+    optional uint32 storagePolicy = 16 [default = 0]; // block storage policy id
+}
+
+pub struct DirectoryListing {
+    //repeated HdfsFileStatusProto partialListing = 1;
+    partial_listing: HdfsFileStatus,
+    //required uint32 remainingEntries  = 2;
+    remaining_entries: u32
+}
+
+pub struct GetListingResponse {
+    //optional DirectoryListingProto dirList = 1;
+    pub dir_list: DirectoryListingProto
+}
+
+
+#[derive(Debug)]
+pub enum NnaRsp {
+    GetListing(GetListingResponse)
+}
+
+impl NnaRsp {
+    fn new(nn: NnR) -> NnaRsp {
+        match nn {
+            NnR::GetListing(glr) => {
+                let dir_list = pb_decons!(GetListingResponseProto, glr, dir_list);
+                NnaRsp::GetListing(GetListingResponse { dir_list })
+            }
+        }
+    }
+}
+*/
+
+
+#[derive(Debug)]
+pub struct NnaR {
+    pub inner: NnR
+}
+
+impl NnaR {
+    fn new(inner: NnR) -> NnaR { NnaR { inner } }
+}
+
+#[derive(Debug)]
 pub struct Connection {
     io: Framed<TcpStream, NnCodec>,
     client_id: Vec<u8>,
@@ -51,48 +139,6 @@ fn get_client_id() -> Vec<u8> {
     Vec::from(&(uuid.as_bytes()[..]))
 }
 
-impl Stream for Connection {
-    type Item = <Framed<TcpStream, NnCodec> as Stream>::Item;
-    type Error = <Framed<TcpStream, NnCodec> as Stream>::Error;
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.io.poll()
-    }
-}
-
-fn validate_response(response_header: &RpcResponseHeaderProto,
-                     client_id: &Vec<u8>, call_id: i32)
-    -> Result<()> {
-    let (r_call_id, r_status, r_client_id) =
-        pb_decons!(RpcResponseHeaderProto, response_header, call_id, status, client_id);
-
-    let _ = match r_status {
-        RpcResponseHeaderProto_RpcStatusProto::SUCCESS =>
-            Ok(()),
-        st @ RpcResponseHeaderProto_RpcStatusProto::ERROR |
-        st @ RpcResponseHeaderProto_RpcStatusProto::FATAL
-        => {
-            let (error_detail, error_msg, exception_class_name) =
-                pb_decons!(RpcResponseHeaderProto, response_header, error_detail, error_msg, exception_class_name);
-            Err(Error::RPC {
-                protocol: "namenode".to_owned(),
-                status: st,
-                error_detail,
-                error_msg: error_msg.to_owned(),
-                exception_class_name: exception_class_name.to_owned()
-            })
-        }
-    }?;
-
-    if r_call_id as i32 != call_id {
-        Err(app_error!(nn "Call id mismatch, found {}, expected {}", r_call_id, call_id))
-    } else if r_client_id != &client_id as &[u8] {
-        Err(app_error!(nn "Client id mismatch, found {:?}, expected {:?}", r_client_id, client_id))
-    } else{
-        Ok(())
-    }
-}
-
 impl Connection {
     pub fn connect_det(addr: &SocketAddr, client_id: Vec<u8>, eff_user: String) -> BFI<Connection> {
         trace!("Trying to connect to {}, client_id={:?}, eff_user={}", addr, client_id, eff_user);
@@ -107,166 +153,110 @@ impl Connection {
         Connection::connect_det(addr, get_client_id(), eff_user)
     }
 
-    #[inline]
-    fn broken_pipe_error() -> IoError {
-        IoError::new(ErrorKind::BrokenPipe, app_error!(other "broken pipe"))
-    }
-
     fn send_handshake(self, eff_user: String) -> BFI<Connection> {
         let Connection { io, client_id, call_id } = self;
         Box::new(
             io.send(RpcReq::Handshake(HandshakeContext::new(client_id.clone(), eff_user)))
                 .map(move |c| Connection { io: c, client_id, call_id }))
     }
+}
 
-    fn send_req(self, q: NnQ, method_name: String) -> BFI<Connection> {
-        let Connection { io, client_id, call_id } = self;
-        Box::new(
-            io.send(
-                RpcReq::Operation(
-                    OpContext {
-                        client_id: client_id.clone(),
-                        call_id,
-                        method_name,
-                    },
-                    q
-                )
-            ).map(
-                move |c| Connection { io: c, client_id, call_id: call_id + 1 }
-            )
-        )
-    }
-
-    fn get_resp(self) -> BFI<(NnR, Connection)> {
-        let rv =
-            self.into_future().and_then(|(orsp, c)|
-                match orsp {
-                    Some(RpcRsp { header, payload }) =>
-                        match (validate_response(&header, &c.client_id, c.call_id - 1), payload) {
-                            (Ok(()), Some(p)) => ok((p, c)),
-                            (Ok(()), None) => err((app_error!(other "Payload required but is empty").into(), c)),
-                            (Err(e), _) => err((e.into(), c))
-                        },
-                    None => err((Connection::broken_pipe_error(), c))
+impl Stream for Connection {
+    type Item = NnaR;
+    type Error = Error;
+    fn poll(&mut self) -> Result<Async<Option<NnaR>>> {
+        match self.io.poll() {
+            Ok(Async::NotReady) =>
+                Ok(Async::NotReady),
+            Ok(Async::Ready(Some(RpcRsp { header, payload }))) =>
+                match (validate_response(header, &self.client_id, self.call_id), payload) {
+                    (Ok(()), Some(p)) => {
+                        self.call_id += 1;
+                        Ok(Async::Ready(Some(NnaR::new(p))))
+                    }
+                    (Ok(()), None) => Err(app_error!(other "Payload required but is empty").into()),
+                    (Err(e), _) => Err(e.into())
                 }
-            ).map_err(|(e, _)| e);
-        Box::new(rv)
-    }
-
-    #[inline]
-    pub fn call(self, q: NnQ) -> BFI<(NnR, Connection)> {
-        let method_name = get_method_name(&q);
-        Box::new(self.send_req(q, method_name).and_then(|c| c.get_resp()))
-    }
-
-    pub fn run<P>(self, p: P) -> BF<(Connection, P), (Error, P)>
-        where P: ProtocolFsm + Send + 'static {
-        Box::new(FsmRunner::new(self, p))
-    }
-}
-
-enum FsmRunner<P> {
-    Init(Connection, P),
-    Op(P, BFI<(NnR, Connection)>),
-    Null
-}
-
-type FRR<P> = StdResult<Async<(Connection, P)>, (Error, P)>;
-
-impl<P> Future for FsmRunner<P>
-    where P: ProtocolFsm + Send +'static {
-    type Item = (Connection, P);
-    type Error = (Error, P);
-
-    fn poll(&mut self) -> FRR<P> {
-        #[inline]
-        fn absolutely_not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, None)  }
-
-        #[inline]
-        fn not_ready<P>(s: FsmRunner<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (s, Some(Ok(Async::NotReady)))  }
-
-        #[inline]
-        fn ready<P>(v: FRR<P>) -> (FsmRunner<P>, Option<FRR<P>>) { (FsmRunner::Null, Some(v)) }
-
-        fn process_result<P>(c: Connection, (r, p): (ProtocolFsmResult, P)) -> (FsmRunner<P>, Option<FRR<P>>) {
-            match r {
-                ProtocolFsmResult::Send(req) =>
-                    absolutely_not_ready(FsmRunner::Op(p, c.call(req))),
-                ProtocolFsmResult::ReturnSuccess =>
-                    ready(Ok(Async::Ready((c, p)))),
-                ProtocolFsmResult::ReturnError(e) =>
-                    ready(Err((e, p)))
-            }
-        }
-
-        loop {
-            let (s1, rv) = match std::mem::replace(self, FsmRunner::Null) {
-                FsmRunner::Init(c, p) => process_result(c, p.start()),
-                FsmRunner::Op(p, mut rsp_f) => match rsp_f.poll() {
-                    Ok(Async::NotReady) =>
-                        not_ready(FsmRunner::Op(p, rsp_f)),
-                    Ok(Async::Ready((rsp, c))) =>
-                        process_result(c, p.incoming(rsp)),
-                    Err(e) =>
-                        ready(Err((e.into(), p)))
-                }
-                FsmRunner::Null =>
-                    panic!("Unfused call to completed FsmRunner"),
-            };
-            *self = s1;
-            if let Some(v) = rv { break v }
+            Ok(Async::Ready(None)) =>
+                Ok(Async::Ready(None)),
+            Err(e) =>
+                Err(e.into())
         }
     }
 }
 
-impl<P> FsmRunner<P>
-    where P: ProtocolFsm + Send +'static {
-
-    fn new(c: Connection, p: P) -> FsmRunner<P> { FsmRunner::Init(c, p) }
-
-}
-
-
-
-/// Wraps `call` operation into `ProtocolFsm`
-#[derive(Debug)]
-pub enum CallW {
-    Q(NnQ),
-    Waiting,
-    R(NnR),
-    Error
-}
-
-impl CallW {
-    pub fn new(q: NnQ) -> CallW { CallW::Q(q) }
-}
-
-impl ProtocolFsm for CallW {
-    fn start(self) -> (ProtocolFsmResult, Self) {
-        match self {
-            CallW::Q(q) => (ProtocolFsmResult::Send(q), CallW::Waiting),
-            x => (ProtocolFsmResult::ReturnError(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x)), CallW::Error)
+impl Sink for Connection {
+    type SinkItem = NnaQ;
+    type SinkError = Error;
+    fn start_send(&mut self, req: NnaQ) -> Result<AsyncSink<NnaQ>> {
+        let method_name = get_method_name(&req.inner);
+        match self.io.start_send(RpcReq::Operation(
+            OpContext {
+                client_id: self.client_id.clone(),
+                call_id: self.call_id,
+                method_name
+            },
+            req.inner
+        )) {
+            Ok(AsyncSink::Ready) => Ok(AsyncSink::Ready),
+            Ok(AsyncSink::NotReady(RpcReq::Operation(_, t))) => Ok(AsyncSink::NotReady(NnaQ { inner: t })),
+            Err(e) => Err(e.into()),
+            _ => Err(app_error!(other "Invalid rejected operation"))
         }
     }
 
-    fn incoming(self, r: NnR) -> (ProtocolFsmResult, Self) {
-        match self {
-            CallW::Waiting => (ProtocolFsmResult::ReturnSuccess, CallW::R(r)),
-            x => (ProtocolFsmResult::ReturnError(app_error!(other "invalid CallWrapper state: expected Q, got `{:?}`", x)), CallW::Error)
-        }
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        self.io.poll_complete().map_err(|e| e.into())
+    }
+
+    fn close(&mut self) -> Result<Async<()>> {
+        self.io.close().map_err(|e| e.into())
     }
 }
 
+#[inline]
 fn get_method_name(q: &NnQ) -> String {
     super::codec::get_method_name(q)
 }
 
+fn validate_response(response_header: RpcResponseHeaderProto,
+                     client_id: &Vec<u8>, call_id: i32)
+                     -> Result<()> {
+    let (
+        r_call_id, r_status, r_client_id, error_detail, error_msg, exception_class_name
+    ) = pb_decons!(RpcResponseHeaderProto, response_header,
+        call_id, status, client_id, error_detail, error_msg, exception_class_name
+    );
+
+    let _ = match r_status {
+        RpcResponseHeaderProto_RpcStatusProto::SUCCESS =>
+            Ok(()),
+        st @ RpcResponseHeaderProto_RpcStatusProto::ERROR |
+        st @ RpcResponseHeaderProto_RpcStatusProto::FATAL
+        => Err(Error::RPC {
+            protocol: "namenode".to_owned(),
+            status: st,
+            error_detail,
+            error_msg: error_msg.to_owned(),
+            exception_class_name: exception_class_name.to_owned()
+        })
+    }?;
+
+    if r_call_id as i32 != call_id {
+        Err(app_error!(nn "Call id mismatch, found {}, expected {}", r_call_id, call_id))
+    } else if r_client_id != &client_id as &[u8] {
+        Err(app_error!(nn "Client id mismatch, found {:?}, expected {:?}", r_client_id, client_id))
+    } else{
+        Ok(())
+    }
+}
 
 
 #[test]
 fn test_read_listing() {
     use util::test::ptk::*;
-    let t = spawn_test_server("127.0.0.1:58020", test_script! {
+    let host_port = "127.0.0.1:58020";
+    let t = spawn_test_server(host_port, test_script! {
 
     expect "68:72:70:63:09:00:00:00:00:00:1e:10:08:02:10:00:18:05:22:08:01:02:03:04:04:03:02:01:\
     0c:12:0a:0a:08:63:6c:6f:75:64:65:72:61:00:00:00:58:10:08:02:10:00:18:00:22:08:01:02:03:04:04:\
@@ -291,13 +281,13 @@ fn test_read_listing() {
 
     use std::net::ToSocketAddrs;
 
-    let addr = "127.0.0.1:58020".to_socket_addrs().unwrap().next().unwrap();
+    let addr = host_port.to_socket_addrs().unwrap().next().unwrap();
 
     let c = Connection::connect_det(
         &addr,
         vec![1, 2, 3, 4, 4, 3, 2, 1],
         "cloudera".to_owned()
-    );
+    ).map_err(|e| e.into());
 
     let src = "/".to_owned();
 
@@ -307,14 +297,15 @@ fn test_read_listing() {
         need_location: false
         );
 
-    //let (_, r) = c.call::<_, GetListingResponseProto>(st, "getListing".to_owned(), q).unwrap();
     let f =
-        c.and_then(|conn| conn.call(NnQ::GetListing(q)));
+        c.and_then(|conn| conn.send(NnaQ { inner: NnQ::GetListing(q) }));
 
-    let (nr, _) = f.wait().unwrap();
+    let c = f.wait().unwrap();
 
-    let r = match nr {
-        NnR::GetListing(glr) => glr,
+    let (nna_rsp, _c) = c.into_future().wait().unwrap();
+
+    let r = match nna_rsp {
+        Some(NnaR { inner: NnR::GetListing(glr) }) => glr,
         _ => panic!("invalid reesp")
     };
 
@@ -329,15 +320,15 @@ fn test_read_listing() {
             };
             println!("{}\t{}", String::from_utf8_lossy(fs.get_path()), sz);
         }*/
-    let x: &[HdfsFileStatusProto] = pb_decons!(DirectoryListingProto,
+    trace!("RESULT: {:?}", r);
+
+    let x = pb_decons!(DirectoryListingProto,
             pb_decons!(GetListingResponseProto, r, dir_list),
             partial_listing);
 
     let y: Vec<Cow<str>> = x.iter().map(|fs| String::from_utf8_lossy(fs.get_path())).collect();
     let z: Vec<Cow<str>> =(["benchmarks", "hbase", "solr", "tmp", "user", "var"]).iter().map(|x|Cow::from(*x)).collect();
     assert_eq!(y, z);
-
-    trace!("RESULT: {:?}", r);
 
     //-----------------------------------
     let _ = t.join().unwrap();

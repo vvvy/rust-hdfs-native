@@ -2,6 +2,7 @@ use std::fmt;
 use std::fmt::Debug;
 use byteorder::{ByteOrder, BigEndian};
 use crc::crc32;
+use protobuf_api::*;
 
 
 pub trait ChecksumValidator: Send + Debug {
@@ -56,5 +57,17 @@ impl CVCRC32 {
     }
     pub fn new_crc32c(bytes_per_checksum: usize) -> CVCRC32 {
         CVCRC32 { bytes_per_checksum, algo: crc32::checksum_castagnoli }
+    }
+}
+
+pub fn new_checksum(csp: ChecksumProto) -> Box<ChecksumValidator> {
+    let (ctype, bpc) = pb_decons!(ChecksumProto, csp, type, bytes_per_checksum);
+    match if bpc == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
+        ChecksumTypeProto::CHECKSUM_NULL =>
+            Box::new(CVTrivial),
+        ChecksumTypeProto::CHECKSUM_CRC32 =>
+            Box::new(CVCRC32::new_crc32(bpc as usize)),
+        ChecksumTypeProto::CHECKSUM_CRC32C =>
+            Box::new(CVCRC32::new_crc32c(bpc as usize))
     }
 }

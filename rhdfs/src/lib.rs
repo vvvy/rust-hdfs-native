@@ -20,19 +20,19 @@ mod types;
 #[macro_use] mod protobuf_api;
 mod result;
 mod codec_tools;
+#[macro_use] mod proto_tools;
+#[macro_use] mod proto_tools2;
 mod dt;
 mod nn;
-mod cpool;
-mod reactor;
+mod cmdx;
 
 pub mod hdfs;
 pub mod config;
 
+pub use cmdx::SessionData;
 pub use types::*;
 pub use error::*;
 pub use result::*;
-pub use cpool::*;
-pub use reactor::*;
 pub use util::*;
 pub use protobuf_api::*;
 
