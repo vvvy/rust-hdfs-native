@@ -21,7 +21,6 @@ mod types;
 mod result;
 mod codec_tools;
 #[macro_use] mod proto_tools;
-#[macro_use] mod proto_tools2;
 mod dt;
 mod nn;
 mod cmdx;

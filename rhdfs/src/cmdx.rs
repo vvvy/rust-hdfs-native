@@ -8,7 +8,7 @@ use nn::*;
 use *;
 
 use util::*;
-use proto_tools::{UserSide, UserAction, UserDeliver};
+use proto_tools::{ProtoFrontEndSourceQ, UserDeliver};
 
 /// Connector abstraction
 pub trait Connector<C, A> {
@@ -208,7 +208,7 @@ pub enum MdxR {
 pub struct Mdx {
     nn: Vec<NnCm>,
     dt: Vec<DtCm>,
-    u: UserSide<MdxR>,
+    u: ProtoFrontEndSourceQ<MdxR>,
     c: NatConnector,
     nna: SocketAddr
 }
@@ -222,7 +222,7 @@ impl Mdx {
         let mut rv = Mdx {
             nn: vec![],
             dt: vec![],
-            u: UserSide::new(),
+            u: ProtoFrontEndSourceQ::new(),
             nna: nn_address,
             c: NatConnector::new(session_data, init_nat)
         };
@@ -238,12 +238,7 @@ impl Mdx {
     #[inline]
     fn handle_nn(&mut self, channel: usize) -> usize {
         if let Some(ud) = self.nn[channel].run(&mut self.c) {
-            self.u.handle_ua(
-                UserAction::new(
-                    Some(ud.map(|r| MdxR::NN(channel, r))),
-                    Some(true),
-                    Some(true))
-            )
+            self.u.push(ud.map(|r| MdxR::NN(channel, r)))
         }
 
         self.nn[channel].q_size()
@@ -252,12 +247,7 @@ impl Mdx {
     #[inline]
     fn handle_dt(&mut self, channel: usize) -> usize {
         if let Some(ud) = self.dt[channel].run(&mut self.c) {
-            self.u.handle_ua(
-                UserAction::new(
-                    Some(ud.map(|r| MdxR::DT(channel, r))),
-                    Some(true),
-                    Some(true))
-            )
+            self.u.push(ud.map(|r| MdxR::DT(channel, r)))
         }
 
         self.dt[channel].q_size()

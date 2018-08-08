@@ -193,7 +193,7 @@ macro_rules! pbdb {
 
 // (file_length, blocks, under_construction, last_block, is_last_block_complete, file_encryption_info)
 { LocatedBlocksProto, file_length, $a:tt }=> { pbdbf!{ get_fileLength, set_fileLength, $a } };
-{ LocatedBlocksProto, blocks, $a:tt }=> { pbdbf!{ get_blocks, set_blocks, take_blocks, $a } };
+{ LocatedBlocksProto, blocks, $a:tt }=> { pbdbf_rep!{ get_blocks, set_blocks, take_blocks, $a } };
 { LocatedBlocksProto, under_construction, $a:tt }=> { pbdbf!{ get_underConstruction, set_underConstruction, $a } };
 { LocatedBlocksProto, last_block, $a:tt }=> { pbdbf!{ get_lastBlock, set_lastBlock, take_lastBlock, $a } };
 { LocatedBlocksProto, is_last_block_complete, $a:tt }=> { pbdbf!{ get_isLastBlockComplete, set_isLastBlockComplete, $a } };
@@ -202,7 +202,7 @@ macro_rules! pbdb {
 // (b, offset, locs, corrupt, block_token, is_cached, storage_types, storage_ids)
 { LocatedBlockProto, b, $a:tt }=> { pbdbf!{ get_b, set_b, take_b, $a } };
 { LocatedBlockProto, offset, $a:tt }=> { pbdbf!{ get_offset, set_offset, $a } };
-{ LocatedBlockProto, locs, $a:tt }=> { pbdbf!{ get_locs, set_locs, take_locs, $a } };
+{ LocatedBlockProto, locs, $a:tt }=> { pbdbf_rep!{ get_locs, set_locs, take_locs, $a } };
 { LocatedBlockProto, corrupt, $a:tt }=> { pbdbf!{ get_corrupt, set_corrupt, $a } };
 { LocatedBlockProto, block_token, $a:tt }=> { pbdbf!{ get_blockToken, set_blockToken, take_blockToken, $a } };
 { LocatedBlockProto, is_cached, $a:tt }=> { pbdbf!{ get_isCached, set_isCached, take_isCached, $a } };

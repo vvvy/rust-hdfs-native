@@ -4,6 +4,7 @@
 extern crate env_logger;
 extern crate chrono;
 extern crate futures;
+extern crate tokio;
 #[macro_use] extern crate rhdfs;
 
 mod util;
@@ -68,7 +69,7 @@ fn main_loop(cmd: Command, cfg: config::Common) -> Result<()> {
         Command::GetListing(args) =>
             get_listing(mdx, args),
         Command::Get(args) =>
-            /*get(&mut rr, c, args)*/unimplemented!(),
+            get(mdx, args),
         Command::Version =>
             version(),
         Command::Help|Command::Null =>
@@ -129,7 +130,7 @@ fn get_listing(mdx: Mdx, args: args::GetListing) -> Result<()> {
         let (s, _) = hdfs::get_listing(mdx, src.clone(), false)
             .forward(util::ForEachSink::<_, _, Error>::new(|fs| Ok(for file in fs { print_file(file, &src) })))
             .wait()?;
-        Ok(s.into_inner().into_inner())
+        Ok(s.into_inner())
     })?;
 
     Ok(())
@@ -194,25 +195,26 @@ fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
 
 }
 
-/*
-fn get(r: &mut SyncReactorRunner, mut c: ReactorClient, args: args::Get) -> Result<()> {
-    use std::fs::File;
+
+fn get(mut mdx: Mdx, args: args::Get) -> Result<()> {
+    use tokio::fs::File;
 
     let copy_vec = build_copy_list(args.fs)?;
 
     //TODO add some parallelism here
     for (src, dst) in copy_vec {
         debug!("Copying {} -> {}", src, dst.display());
-        let of = File::create(dst)?;
-        let ((c1, get), rv) = r.exec(hdfs::get(c, src, of)).commute();
-        c = c1;
-        debug!("get result: {:?} {:?}", rv, get);
-        let _ = rv?;
+        let wf = File::create(dst);
+        let r = hdfs::get(mdx, src);
+        let f = wf.and_then(|w| tokio::io::copy(r, w));
+        let (count, r, _) = f.wait()?;
+        debug!("{} bytes written", count);
+        mdx = r.decons().0.into_inner();
     }
 
     Ok(())
 }
-*/
+
 fn version() -> ! {
     println!(
         "{} ({}) version {}",

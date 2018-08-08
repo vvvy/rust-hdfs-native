@@ -164,6 +164,8 @@ impl proto_tools::ProtoFsm for ProtoFsm {
         use proto_tools::NetEvent as E;
         trace!("handle_n[{}]: {:?}/{:?} => ..", self.client_name, self.state, ne);
         let (a, s) = match (std::mem::replace(&mut self.state, ConnectionState::Idle), ne) {
+            (S::Idle, E::Init) =>
+                fsmc!(/ S::Idle),
             (S::RbSendReq(rr), E::Idle) =>
                 fsmc!(/ S::RbRecvInitResp(rr)),
             (S::RbRecvInitResp(rr), E::Incoming(DtR::ReadBlock(OpBlockReadMessage::Initial(has_data, borp)))) =>
@@ -226,8 +228,6 @@ impl proto_tools::ProtoFsm for ProtoFsm {
         use proto_tools::UserEvent as E;
         trace!("handle_u[{}]: event {:?}", self.client_name, ue);
         let (a, s) = match (std::mem::replace(&mut self.state, ConnectionState::Idle), ue) {
-            (S::Idle, E::Init) =>
-                fsmc!(/ S::Idle),
             (S::Idle, E::Message(DtaQ::ReadBlock(rb))) => {
                 let transfer_range = (rb.offset as i64, (rb.offset + rb.len) as i64);
                 fsmc!(send(DtQ::ReadBlock(mk_read_block(rb, &self.client_name))) / S::RbSendReq(transfer_range))
@@ -245,7 +245,7 @@ impl proto_tools::ProtoFsm for ProtoFsm {
 
 
 pub struct Connection {
-    inner: proto_tools::ProtocolLayer<Framed<TcpStream, DtCodec>, ProtoFsm>
+    inner: proto_tools::layer::T<Framed<TcpStream, DtCodec>, ProtoFsm>
 }
 
 impl Connection {
@@ -254,7 +254,7 @@ impl Connection {
         let rv =
             TcpStream::connect(addr)
                 .map(|c| Connection {
-                    inner: proto_tools::ProtocolLayer::new(
+                    inner: proto_tools::layer::new(
                         c.framed(DtCodec::new()),
                         ProtoFsm::new(client_name)
                     )

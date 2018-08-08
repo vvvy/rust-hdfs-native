@@ -39,75 +39,52 @@ impl GetListingState {
                     )
     }
 
-    fn next(&mut self, glrp: GetListingResponseProto) -> (Option<GetListingRequestProto>, PartialListingMessage) {
-        let dir_list = pb_decons!(GetListingResponseProto, glrp, dir_list);
+    fn s(&mut self) -> GetListingRequestProto {
+        self.q(vec![])
+    }
+
+    fn n(&mut self, nr: GetListingResponseProto) -> (Vec<HdfsFileStatusProto>, Option<GetListingRequestProto>) {
+        let dir_list = pb_decons!(GetListingResponseProto, nr, dir_list);
         let (fs, remaining_entries) = pb_decons!(DirectoryListingProto, dir_list,
                     partial_listing, remaining_entries);
 
         if remaining_entries == 0 {
-            (None, PartialListingMessage { fs, last: true })
+            (fs, None)
         } else {
             let last_filename = Vec::from(
                 fs.last().map(|o| pb_get!(HdfsFileStatusProto, o, path)).unwrap_or(&[])
             );
-            (Some(self.q(last_filename)), PartialListingMessage { fs, last: false })
+            (fs, Some(self.q(last_filename)))
         }
-    }
-
-    fn start(&self) -> GetListingRequestProto {
-        self.q(vec![])
     }
 }
 
-//TODO this can be generalized, if more tan one RmR instances occur
-
-impl ProtoFsm for GetListingState {
+impl ChatF for GetListingState {
     type NQ = MdxQ;
     type NR = MdxR;
-    type UQ = ();
-    type UR = PartialListingMessage;
+    type UR = Vec<HdfsFileStatusProto>;
 
-    fn handle_n(&mut self, ne: NetEvent<MdxR>) -> Action<MdxQ, PartialListingMessage> {
-        match ne {
-            NetEvent::Incoming(MdxR::NN(_, NnaR { inner: NnR::GetListing(glrp)})) => {
-                let (glrp_opt, data) = self.next(glrp);
-                if let Some(glrp) = glrp_opt {
-                    Action::z().deliver(data).send(MdxQ::NN(0, None, NnaQ::new(NnQ::GetListing(glrp))))
-                } else {
-                    Action::z().deliver(data).recv(false)
-                }
-            }
-            NetEvent::Incoming(other) =>
-                Action::z().err(app_error!(other "Unexpected message {:?} (where NN:GetListingResponseProto expected)", other)),
-            NetEvent::Err(err) =>
-                Action::z().err(err),
-            NetEvent::Idle =>
-                Action::z().recv(true),
-            NetEvent::EndOfStream =>
-                Action::z().err(app_error!(other "Premature end of stream"))
-        }
+    fn start(&mut self) -> MdxQ {
+        MdxQ::NN(0, None, NnaQ::new(NnQ::GetListing(self.s())))
     }
 
-    fn handle_u(&mut self, ue: UserEvent<()>) -> Action<MdxQ, PartialListingMessage> {
-        match ue {
-            UserEvent::Init =>
-                Action::z().accept(true),
-            UserEvent::Message(()) => //start
-                Action::z().send(MdxQ::NN(0, None, NnaQ::new(NnQ::GetListing(self.start())))),
-            UserEvent::Flush =>
-                Action::z().send_complete(true)
+    fn next(&mut self, nr: MdxR) -> Result<(Vec<HdfsFileStatusProto>, Option<MdxQ>)> {
+        match nr {
+            MdxR::NN(_, NnaR { inner: NnR::GetListing(glrp)}) => {
+                let (a, ob) = self.n(glrp);
+                Ok((a, ob.map(|n| MdxQ::NN(0, None, NnaQ::new(NnQ::GetListing(n))))))
+            }
+            other =>
+                Err(app_error!(other "Unexpected {:?} where NN(GetListing) is expected", other))
         }
     }
 }
 
 
-pub type GetListingStream = ReqMultiResp<ProtocolLayer<Mdx, GetListingState>, PartialListingMessage, Vec<HdfsFileStatusProto>>;
+pub type GetListingStream = chat::T<Mdx, GetListingState>;
 
 pub fn get_listing(mdx: Mdx, source: String, need_location: bool) -> GetListingStream {
-    GetListingStream::new(
-        ProtocolLayer::new(mdx, GetListingState::new(source,need_location)),
-        |m| (m.fs, m.last)
-    )
+    chat::new(mdx, GetListingState::new(source, need_location))
 }
 
 
@@ -286,6 +263,13 @@ struct GetFsm {
 }
 
 impl GetFsm {
+    fn new(read_offset: u64, max_read_offset: u64) -> GetFsm {
+        GetFsm { q: VecDeque::new(), read_offset, max_read_offset }
+    }
+
+    fn adjust_max_read_offset(&mut self, max_read_offset: u64) {
+        self.max_read_offset = max_read_offset.min(self.max_read_offset);
+    }
 
     fn next_block(&mut self) -> GetFsmAction {
         if self.read_offset < self.max_read_offset {
@@ -333,7 +317,6 @@ impl GetFsm {
     }
 }
 
-
 pub struct Get {
     /// Source file path
     src: String,
@@ -341,8 +324,11 @@ pub struct Get {
 }
 
 impl Get {
+    fn new(src: String, read_offset: u64, max_read_offset: u64) -> Get {
+        Get { src, fsm: GetFsm::new(read_offset, max_read_offset) }
+    }
 
-    fn translate_a(&self, a: GetFsmAction) -> Action<MdxQ, Bytes> {
+    fn translate_a(&self, a: GetFsmAction) -> SourceAction<MdxQ, Bytes> {
         fn get_block_locations_request(src: String, offset: u64, length: u64) -> MdxQ {
             let q = pb_cons!{GetBlockLocationsRequestProto,
                 src: src,
@@ -364,70 +350,112 @@ impl Get {
 
         match a {
             GetFsmAction::NOP =>
-                Action::z(),
+                SourceAction::z(),
             GetFsmAction::RequestBlockLocations { offset, len } =>
-                Action::z().send(get_block_locations_request(self.src.clone(), offset, len)),
+                SourceAction::z().send(get_block_locations_request(self.src.clone(), offset, len)),
             GetFsmAction::ReadBlock(datanode_info, read_block) =>
                 match read_block_request(datanode_info, read_block) {
-                    Ok(r) => Action::z().send(r),
-                    Err(e) => Action::z().err(e)
+                    Ok(r) => SourceAction::z().send(r),
+                    Err(e) => SourceAction::z().err(e)
                 }
             GetFsmAction::Err(e) =>
-                Action::z().err(e),
+                SourceAction::z().err(e),
             GetFsmAction::Success =>
-                Action::z().eos()
+                SourceAction::z().eos()
         }
     }
 
     #[inline]
-    fn handle_t(&mut self, evt: GetFsmEvent) -> Action<MdxQ, Bytes> {
+    fn handle_t(&mut self, evt: GetFsmEvent) -> SourceAction<MdxQ, Bytes> {
         let a = self.fsm.handle(evt);
         self.translate_a(a)
     }
 
-    fn translate_block_locations(gblrp: GetBlockLocationsResponseProto) -> Vec<LocatedBlock> {
-        unimplemented!()
+    fn translate_block_locations(&mut self, gblrp: GetBlockLocationsResponseProto) -> Result<Vec<LocatedBlock>> {
+        let lbp = pb_decons!(GetBlockLocationsResponseProto, gblrp, locations);
+        let (
+            file_length, blocks
+            //, _under_construction, _last_block, _is_last_block_complete, _file_encryption_info
+        ) = pb_decons!(LocatedBlocksProto, lbp,
+                    file_length, blocks
+                    //, under_construction, last_block, is_last_block_complete, file_encryption_info
+                    );
+
+        self.fsm.adjust_max_read_offset(file_length);
+
+        blocks.into_iter().fold(Ok(Vec::new()), |mut r, block| {
+            if let Ok(r) = r {
+                let (
+                    b, offset, locs, corrupt, block_token //, _is_cached, _storage_types, _storage_ids
+                ) = pb_decons!(LocatedBlockProto, block,
+                        b, offset, locs, corrupt, block_token //, is_cached, storage_types, storage_ids
+                        );
+                if corrupt {
+                    Err(app_error!(other "All instances of block {:?} are corrupt", b).into())
+                } else {
+                    Ok(vec_cons(r, LocatedBlock {
+                        o: offset,
+                        b: b.into(),
+                        t: block_token.into(),
+                        locs: {
+                            let o: Vec<DatanodeInfo> = locs.into_iter().map(|w| w.into()).collect();
+                            o.into()
+                        }
+                    }))
+                }
+            } else {
+                r
+            }
+        })
     }
 }
 
-impl ProtoFsm for Get {
+impl ProtoFsmSource for Get {
     type NQ = MdxQ;
     type NR = MdxR;
-    type UQ = ();
     type UR = Bytes;
 
-    fn handle_n(&mut self, ne: NetEvent<MdxR>) -> Action<MdxQ, Bytes> {
+    fn handle_n(&mut self, ne: NetEvent<MdxR>) -> SourceAction<MdxQ, Bytes> {
         match ne {
+            NetEvent::Init =>
+                self.handle_t(GetFsmEvent::Init).recv(true),
             NetEvent::Incoming(MdxR::NN(_, NnaR { inner: NnR::GetBlockLocations(gblrp) })) =>
-                self.handle_t(GetFsmEvent::BlockLocations(Self::translate_block_locations(gblrp))),
+                match self.translate_block_locations(gblrp) {
+                    Ok(bloc) => self.handle_t(GetFsmEvent::BlockLocations(bloc)),
+                    Err(e) => SourceAction::z().err(e)
+                }
             NetEvent::Incoming(MdxR::DT(_, DtaR::Data(bytes))) =>
                 if !bytes.is_empty() {
-                    Action::z().deliver(bytes)
+                    SourceAction::z().deliver(bytes)
                 } else {
                     self.handle_t(GetFsmEvent::BlockComplete)
                 }
             NetEvent::Incoming(other) =>
-                Action::z().err(app_error!(other "Unexpected response: {:?}", other)),
+                SourceAction::z().err(app_error!(other "Unexpected response: {:?}", other)),
             NetEvent::Idle =>
-                Action::z(),
+                SourceAction::z(),
             NetEvent::Err(e) =>
-                Action::z().err(e),
+                SourceAction::z().err(e),
             NetEvent::EndOfStream =>
-                Action::z().err(app_error!(premature eof))
-
+                SourceAction::z().err(app_error!(premature eof))
         }
     }
+}
 
-    fn handle_u(&mut self, ue: UserEvent<()>) -> Action<MdxQ, Bytes> {
-        match ue {
-            UserEvent::Init =>
-                Action::z().accept(true),
-            UserEvent::Message(()) =>
-                self.handle_t(GetFsmEvent::Init).recv(true).accept(false),
-            UserEvent::Flush =>
-                Action::z().send_complete(true)
-        }
-    }
+pub type GetStream = source_layer::T<Mdx, Get>;
+
+pub fn get_part_stream(mdx: Mdx, src: String, start_offset: u64, end_offset: u64) -> GetStream {
+    source_layer::new(mdx, Get::new(src, start_offset, end_offset))
+}
+
+pub fn get_stream(mdx: Mdx, src: String) -> GetStream {
+    get_part_stream(mdx, src, 0, u64::max_value())
+}
+
+pub type GetAsyncRead = async_io::AsyncReadStream<GetStream>;
+
+pub fn get(mdx: Mdx, src: String) -> GetAsyncRead {
+    async_io::AsyncReadStream::new(get_stream(mdx, src))
 }
 
 

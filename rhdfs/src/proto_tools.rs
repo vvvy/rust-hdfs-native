@@ -1,13 +1,13 @@
-
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
-use futures::{Stream, Sink, Async, AsyncSink};
+use futures::prelude::*; //{Stream, Sink, Async, AsyncSink};
 use *;
 
 #[derive(Debug)]
 pub enum NetEvent<NR> {
+    Init,
     Idle,
     Incoming(NR),
     Err(Error),
@@ -16,9 +16,6 @@ pub enum NetEvent<NR> {
 
 #[derive(Debug)]
 pub enum UserEvent<UQ> {
-    ///NOTE: delivered outside of the context of a task, thus should only be used to
-    ///set flow control flags
-    Init,
     Message(UQ),
     Flush
 }
@@ -26,6 +23,7 @@ pub enum UserEvent<UQ> {
 #[derive(Debug)]
 pub enum UserDeliver<UR> {
     Message(UR),
+    MessageLast(UR),
     EndOfStream,
     Err(Error)
 }
@@ -34,6 +32,7 @@ impl<UR> UserDeliver<UR> {
     pub fn map<UR2>(self, f: impl FnOnce(UR) -> UR2) -> UserDeliver<UR2> {
         match self {
             UserDeliver::Message(m) => UserDeliver::Message(f(m)),
+            UserDeliver::MessageLast(m) => UserDeliver::MessageLast(f(m)),
             UserDeliver::EndOfStream => UserDeliver::EndOfStream,
             UserDeliver::Err(e) => UserDeliver::Err(e)
         }
@@ -51,22 +50,70 @@ pub struct NetAction<NQ> {
 impl<NQ> NetAction<NQ> {
     /// Neutral (zero) action value, a no-op by itself
     #[inline]
-    pub fn z() -> NetAction<NQ> {
-        NetAction { send: None, receive: None }
-    }
+    pub fn z() -> NetAction<NQ> {  NetAction { send: None, receive: None } }
     #[inline]
-    pub fn send(self, req: NQ) -> NetAction<NQ> {
-        NetAction { send: Some(req), ..self }
-    }
+    pub fn send(self, req: NQ) -> NetAction<NQ> { NetAction { send: Some(req), ..self } }
     #[inline]
-    pub fn recv(self, v: bool) -> NetAction<NQ> {
-        NetAction { receive: Some(v), ..self }
+    pub fn recv(self, v: bool) -> NetAction<NQ> { NetAction { receive: Some(v), ..self } }
+}
+
+
+#[derive(Debug)]
+pub struct SinkAction<NQ> {
+    n: NetAction<NQ>,
+    /// Receiver state (== User can send)
+    accept: Option<bool>,
+    /// Sending complete
+    send_complete: Option<bool>
+}
+
+impl<NQ> SinkAction<NQ> {
+    #[inline]
+    pub fn z() -> SinkAction<NQ> { SinkAction { n: NetAction::z(), accept: None, send_complete: None } }
+    #[inline]
+    pub fn send(self, req: NQ) -> SinkAction<NQ> { SinkAction { n: self.n.send(req), ..self } }
+    #[inline]
+    pub fn recv(self, v: bool) -> SinkAction<NQ> { SinkAction { n: self.n.recv(v), ..self } }
+    #[inline]
+    pub fn accept(self, v: bool) -> SinkAction<NQ> { SinkAction { accept: Some(v), ..self } }
+    #[inline]
+    pub fn send_complete(self, v: bool) -> SinkAction<NQ> { SinkAction { send_complete: Some(v), ..self } }
+    #[inline]
+    pub fn bits(self, recv: bool, accept: bool, send_complete: bool) -> SinkAction<NQ> {
+        self.recv(recv).accept(accept).send_complete(send_complete)
     }
 }
 
 #[derive(Debug)]
-pub struct UserAction<UR> {
-    /// Message to deliver to the user
+pub struct SourceAction<NQ, UR> {
+    n: NetAction<NQ>,
+    /// Delivery to the user
+    deliver: Option<UserDeliver<UR>>
+}
+
+impl<NQ, UR> SourceAction<NQ, UR> {
+    #[inline]
+    pub fn z() -> SourceAction<NQ, UR> { SourceAction { n: NetAction::z(), deliver:None } }
+    #[inline]
+    pub fn send(self, req: NQ) -> SourceAction<NQ, UR> { SourceAction { n: self.n.send(req), ..self } }
+    #[inline]
+    pub fn recv(self, v: bool) -> SourceAction<NQ, UR> { SourceAction { n: self.n.recv(v), ..self } }
+    #[inline]
+    pub fn bits(self, recv: bool) -> SourceAction<NQ, UR> { self.recv(recv) }
+    #[inline]
+    pub fn deliver(self, rsp: UR) -> SourceAction<NQ, UR> { SourceAction { deliver: Some(UserDeliver::Message(rsp)), ..self } }
+    #[inline]
+    pub fn deliver_last(self, rsp: UR) -> SourceAction<NQ, UR> { SourceAction { deliver: Some(UserDeliver::MessageLast(rsp)), ..self } }
+    #[inline]
+    pub fn eos(self) -> SourceAction<NQ, UR> { SourceAction { deliver: Some(UserDeliver::EndOfStream), ..self } }
+    #[inline]
+    pub fn err(self, e: Error) -> SourceAction<NQ, UR> { SourceAction { deliver: Some(UserDeliver::Err(e)), ..self } }
+}
+
+#[derive(Debug)]
+pub struct Action<NQ, UR> {
+    n: NetAction<NQ>,
+    /// Delivery to the user
     deliver: Option<UserDeliver<UR>>,
     /// Receiver state (== User can send)
     accept: Option<bool>,
@@ -74,107 +121,27 @@ pub struct UserAction<UR> {
     send_complete: Option<bool>
 }
 
-impl<UR> UserAction<UR> {
-    #[inline]
-    pub fn new(deliver: Option<UserDeliver<UR>>, accept: Option<bool>, send_complete: Option<bool>) -> UserAction<UR> {
-        UserAction { deliver, accept, send_complete }
-    }
-    /// Neutral (zero) action value, a no-op by itself
-    #[inline]
-    pub fn z() -> UserAction<UR> {
-        UserAction { deliver: None, accept: None, send_complete: None }
-    }
-    #[inline]
-    pub fn deliver(self, rsp: UR) -> UserAction<UR> {
-        UserAction { deliver: Some(UserDeliver::Message(rsp)), ..self }
-    }
-    #[inline]
-    pub fn eos(self) -> UserAction<UR> {
-        UserAction { deliver: Some(UserDeliver::EndOfStream), ..self }
-    }
-    #[inline]
-    pub fn err(self, e: Error) -> UserAction<UR> {
-        UserAction { deliver: Some(UserDeliver::Err(e)), ..self }
-    }
-    #[inline]
-    pub fn accept(self, v: bool) -> UserAction<UR> {
-        UserAction { accept: Some(v), ..self }
-
-    }
-    #[inline]
-    pub fn send_complete(self, v: bool) -> UserAction<UR> {
-        UserAction { send_complete: Some(v), ..self }
-    }
-}
-
-#[derive(Debug)]
-pub struct Action<NQ, UR> {
-    n: NetAction<NQ>,
-    u: UserAction<UR>
-}
-
 impl<NQ, UR> Action<NQ, UR> {
-    /// Neutral (zero) action value, a no-op by itself
     #[inline]
-    pub fn z() -> Action<NQ, UR> {
-        Action {
-            n: NetAction::z(),
-            u: UserAction::z()
-        }
-    }
+    pub fn z() -> Action<NQ, UR> { Action { n: NetAction::z(), deliver:None, accept: None, send_complete: None } }
     #[inline]
-    pub fn send(self, req: NQ) -> Action<NQ, UR> {
-        Action {
-            n: self.n.send(req),
-            ..self
-        }
-    }
+    pub fn send(self, req: NQ) -> Action<NQ, UR> { Action { n: self.n.send(req), ..self } }
     #[inline]
-    pub fn recv(self, v: bool) -> Action<NQ, UR> {
-        Action {
-            n: self.n.recv(v),
-            ..self
-        }
-    }
+    pub fn recv(self, v: bool) -> Action<NQ, UR> { Action { n: self.n.recv(v), ..self } }
     #[inline]
-    pub fn deliver(self, rsp: UR) -> Action<NQ, UR> {
-        Action {
-            u: self.u.deliver(rsp),
-            ..self
-        }
-    }
+    pub fn accept(self, v: bool) -> Action<NQ, UR> { Action { accept: Some(v), ..self } }
     #[inline]
-    pub fn eos(self) -> Action<NQ, UR> {
-        Action {
-            u: self.u.eos(),
-            ..self
-        }
-    }
-    #[inline]
-    pub fn err(self, e: Error) -> Action<NQ, UR> {
-        Action {
-            u: self.u.err(e),
-            ..self
-        }
-    }
-    #[inline]
-    pub fn accept(self, v: bool) -> Action<NQ, UR> {
-        Action {
-            u: self.u.accept(v),
-            ..self
-        }
-    }
-    #[inline]
-    pub fn send_complete(self, v: bool) -> Action<NQ, UR> {
-        Action {
-            u: self.u.send_complete(v),
-            ..self
-        }
-    }
+    pub fn send_complete(self, v: bool) -> Action<NQ, UR> { Action { send_complete: Some(v), ..self } }
     #[inline]
     pub fn bits(self, recv: bool, accept: bool, send_complete: bool) -> Action<NQ, UR> {
         self.recv(recv).accept(accept).send_complete(send_complete)
     }
+    #[inline]
+    pub fn deliver(self, rsp: UR) -> Action<NQ, UR> { Action { deliver: Some(UserDeliver::Message(rsp)), ..self } }
+    #[inline]
+    pub fn eos(self) -> Action<NQ, UR> { Action { deliver: Some(UserDeliver::EndOfStream), ..self } }
+    #[inline]
+    pub fn err(self, e: Error) -> Action<NQ, UR> { Action { deliver: Some(UserDeliver::Err(e)), ..self } }
 }
 
 /*
@@ -225,6 +192,12 @@ impl<N, NQ, NR> NetSide<N, NQ, NR> where
     }
 
     #[inline]
+    fn reset(&mut self) {
+        self.sending = false;
+        self.receiving = false;
+    }
+
+    #[inline]
     fn handle_na(&mut self, NetAction { send, receive }: NetAction<NQ>) -> Option<Error> {
         if let Some(receive) = receive { self.receiving = receive }
         match send {
@@ -233,12 +206,16 @@ impl<N, NQ, NR> NetSide<N, NQ, NR> where
                     self.sending = true;
                     None
                 }
-                Ok(AsyncSink::NotReady(m)) =>
-                //TODO this behaviour could be redesigned, to support buffered blind sending
-                //introduce N.A. SendBuffered, Flush and N.E. SendOverflow(m)
-                    Some(app_error!(other "Sink overflow on {:?}", m)),
-                Err(e) =>
+                Ok(AsyncSink::NotReady(m)) => {
+                    //TODO this behaviour could be redesigned, to support buffered blind sending
+                    //introduce N.A. SendBuffered, Flush and N.E. SendOverflow(m)
+                    self.reset();
+                    Some(app_error!(other "Sink overflow on {:?}", m))
+                }
+                Err(e) => {
+                    self.reset();
                     Some(e)
+                }
             }
             None =>
                 None
@@ -278,39 +255,215 @@ impl<N, NQ, NR> NetSide<N, NQ, NR> where
     }
 }
 
-pub struct UserSide<UR> {
-    send_complete: bool,
-    accept: bool,
-    deliver: VecDeque<UserDeliver<UR>>
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait ProtoFsmSource {
+    type NQ: Debug;
+    type NR: Debug;
+    type UR: Debug;
+    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> SourceAction<Self::NQ, Self::UR>;
 }
 
-impl<UR> UserSide<UR> {
-    pub fn new() -> UserSide<UR> {
-        UserSide {
-            send_complete: false,
-            accept: false,
-            deliver: VecDeque::new()
+pub trait ProtoFsmSink {
+    type NQ: Debug;
+    type NR: Debug;
+    type UQ: Debug;
+    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> SinkAction<Self::NQ>;
+    fn handle_u(&mut self, ue: UserEvent<Self::UQ>) -> SinkAction<Self::NQ>;
+}
+
+pub trait ProtoFsm {
+    type NQ: Debug;
+    type NR: Debug;
+    type UQ: Debug;
+    type UR: Debug;
+    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> Action<Self::NQ, Self::UR>;
+    fn handle_u(&mut self, ue: UserEvent<Self::UQ>) -> Action<Self::NQ, Self::UR>;
+}
+
+//==================================================================================================
+
+
+pub trait ProtoFrontEndBase {
+    type NQ: Debug;
+    type NR: Debug;
+    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> NetAction<Self::NQ>;
+    fn take_error(&mut self) -> Result<()>;
+    fn push_error(&mut self, e: Error);
+}
+
+pub trait ProtoFrontEndSource: ProtoFrontEndBase {
+    type UR: Debug;
+    fn take_deliver(&mut self) -> Result<Async<Option<Self::UR>>>;
+}
+
+pub trait ProtoFrontEndFuture: ProtoFrontEndBase {
+    type UR: Debug;
+    fn take_deliver(&mut self) -> Result<Async<Self::UR>>;
+}
+
+pub trait ProtoFrontEndSink: ProtoFrontEndBase {
+    type UQ: Debug;
+    fn is_accept(&self) -> bool;
+    fn is_send_complete(&self) -> bool;
+    fn handle_u(&mut self, ue: UserEvent<Self::UQ>) -> NetAction<Self::NQ>;
+}
+
+pub struct ProtoLayer<N, P> where
+    P: ProtoFrontEndBase,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+    n: NetSide<N, P::NQ, P::NR>,
+    u: P,
+    init: bool
+}
+
+impl<N, P> ProtoLayer<N, P> where
+    P: ProtoFrontEndBase,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+
+    pub fn new(io: N, u: P) -> ProtoLayer<N, P> {
+        ProtoLayer {
+            n: NetSide::new(io),
+            u,
+            init: false
         }
     }
 
-    #[inline]
-    pub fn handle_ua(&mut self, UserAction { deliver, accept, send_complete }: UserAction<UR>) {
-        if let Some(accept) = accept { self.accept = accept }
-        if let Some(send_complete) = send_complete { self.send_complete = send_complete }
+    pub fn into_inner(self) -> N { self.n.io }
 
-        if let Some(m) = deliver {
-            self.deliver.push_back(m)
+    #[inline]
+    fn handle_na_int(&mut self, na: NetAction<P::NQ>) {
+        if let Some(e) = self.n.handle_na(na) {
+            self.u.push_error(e)
+        }
+    }
+    #[inline]
+    fn handle_ne_int(&mut self, ne: NetEvent<P::NR>) {
+        let na = self.u.handle_n(ne);
+        self.handle_na_int(na)
+    }
+
+    fn n_poll(&mut self) {
+        while
+            self.n.poll_send().map_or_else(
+                || false,
+                |ne| { self.handle_ne_int(ne); true}
+            )
+            ||
+            self.n.poll_recv().map_or_else(
+                || false,
+                |ne| { self.handle_ne_int(ne); true}
+            )
+            { }
+    }
+
+    #[inline]
+    fn handle_ne(&mut self, ne: NetEvent<P::NR>) {
+        self.handle_ne_int(ne);
+        self.n_poll();
+    }
+
+    #[inline]
+    fn handle_na(&mut self, na: NetAction<P::NQ>) {
+        self.handle_na_int(na);
+        self.n_poll();
+    }
+
+    #[inline]
+    fn n_init(&mut self) {
+        if !self.init {
+            self.init = true;
+            self.handle_ne(NetEvent::Init)
         }
     }
 
+}
+
+impl<N, P> Stream for ProtoLayer<N, P> where
+    P: ProtoFrontEndSource,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+    type Item = P::UR;
+    type Error = Error;
+    fn poll(&mut self) -> Result<Async<Option<P::UR>>> {
+        self.n_init();
+        self.n_poll();
+        self.u.take_deliver()
+    }
+}
+
+impl<N, P> Future for ProtoLayer<N, P> where
+    P: ProtoFrontEndFuture,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+    type Item = P::UR;
+    type Error = Error;
+    fn poll(&mut self) -> Result<Async<P::UR>> {
+        self.n_init();
+        self.n_poll();
+        self.u.take_deliver()
+    }
+}
+
+impl<N, P> ProtoLayer<N, P> where
+    P: ProtoFrontEndSink,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+
     #[inline]
-    pub fn push_error(&mut self, e: Error) {
-        self.deliver.push_back(UserDeliver::Err(e))
+    fn handle_ue(&mut self, ue: UserEvent<P::UQ>) {
+        let a = self.u.handle_u(ue);
+        self.handle_na(a)
+    }
+}
+
+impl<N, P> Sink for ProtoLayer<N, P> where
+    P: ProtoFrontEndSink,
+    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
+    type SinkItem = P::UQ;
+    type SinkError = Error;
+    fn start_send(&mut self, req: P::UQ) -> Result<AsyncSink<P::UQ>> {
+        self.n_init();
+        let rv = if self.u.is_accept() {
+            self.handle_ue(UserEvent::Message(req));
+            AsyncSink::Ready
+        } else {
+            AsyncSink::NotReady(req)
+        };
+        self.u.take_error().map(|_| rv)
+    }
+
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        self.n_init();
+        if !self.u.is_send_complete() {
+            self.handle_ue(UserEvent::Flush);
+        }
+        self.u.take_error().map(|_| if self.u.is_send_complete() {
+            Async::Ready(())
+        } else {
+            Async::NotReady
+        })
+    }
+    fn close(&mut self) -> Result<Async<()>> {
+        self.poll_complete()
+    }
+}
+
+
+/// Source-side queue implementation
+pub struct ProtoFrontEndSourceQ<UR> {
+    deliver: VecDeque<UserDeliver<UR>>,
+    finished: bool
+}
+
+impl<UR> ProtoFrontEndSourceQ<UR> {
+    pub fn new() -> ProtoFrontEndSourceQ<UR> {
+        ProtoFrontEndSourceQ { deliver: VecDeque::new(), finished: false }
     }
 
     #[inline]
-    pub fn take_error(&mut self) -> Result<()> {
-        if let Some(&UserDeliver::Err(..)) = self.deliver.front() {
+    fn take_error(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(())
+        } else if let Some(&UserDeliver::Err(..)) = self.deliver.front() {
             match self.deliver.pop_front() {
                 Some(UserDeliver::Err(e)) => Err(e),
                 Some(other) => { //should never happen
@@ -323,258 +476,450 @@ impl<UR> UserSide<UR> {
         } else {
             Ok(())
         }
+
+    }
+
+    #[inline]
+    fn push_error(&mut self, e: Error) {
+        self.deliver.push_back(UserDeliver::Err(e))
+    }
+
+    #[inline]
+    pub fn push(&mut self, ud: UserDeliver<UR>) {
+        self.deliver.push_back(ud)
     }
 
     #[inline]
     pub fn take_deliver(&mut self) -> Result<Async<Option<UR>>> {
-        match self.deliver.pop_front() {
-            None =>
-                Ok(Async::NotReady),
-            Some(UserDeliver::Message(r)) =>
-                Ok(Async::Ready(Some(r))),
-            Some(UserDeliver::EndOfStream) =>
-                Ok(Async::Ready(None)),
-            Some(UserDeliver::Err(e)) =>
-                Err(e),
+        if self.finished {
+            Ok(Async::Ready(None))
+        } else {
+            match self.deliver.pop_front() {
+                None =>
+                    Ok(Async::NotReady),
+                Some(UserDeliver::Message(r)) =>
+                    Ok(Async::Ready(Some(r))),
+                Some(UserDeliver::MessageLast(r)) => {
+                    self.finished = true;
+                    Ok(Async::Ready(Some(r)))
+                }
+                Some(UserDeliver::EndOfStream) => {
+                    self.finished = true;
+                    Ok(Async::Ready(None))
+                }
+                Some(UserDeliver::Err(e)) =>
+                    Err(e),
+            }
+        }
+
+    }
+}
+
+
+pub struct ProtoFrontEndSourceImpl<P> where P: ProtoFsmSource {
+    q: ProtoFrontEndSourceQ<P::UR>,
+    p: P
+}
+
+impl<P> ProtoFrontEndSourceImpl<P> where P: ProtoFsmSource {
+    fn new(p: P) -> ProtoFrontEndSourceImpl<P> { ProtoFrontEndSourceImpl { q: ProtoFrontEndSourceQ::new(), p } }
+}
+
+impl<P> ProtoFrontEndBase for ProtoFrontEndSourceImpl<P> where
+    P: ProtoFsmSource {
+    type NQ = P::NQ;
+    type NR = P::NR;
+
+    #[inline]
+    fn handle_n(&mut self, ne: NetEvent<P::NR>) -> NetAction<P::NQ> {
+        let SourceAction { n, deliver } = self.p.handle_n(ne);
+        if let Some(deliver) = deliver {
+            self.q.push(deliver)
+        }
+        n
+    }
+
+    #[inline]
+    fn take_error(&mut self) -> Result<()> {
+        self.q.take_error()
+    }
+
+    #[inline]
+    fn push_error(&mut self, e: Error) {
+        self.q.push_error(e)
+    }
+}
+
+impl<P> ProtoFrontEndSource for ProtoFrontEndSourceImpl<P> where
+    P: ProtoFsmSource {
+    type UR = P::UR;
+
+    fn take_deliver(&mut self) -> Result<Async<Option<P::UR>>> {
+        self.q.take_deliver()
+    }
+}
+
+pub struct ProtoFrontEndImpl<P> where P: ProtoFsm {
+    q: ProtoFrontEndSourceQ<P::UR>,
+    accept: bool,
+    send_complete: bool,
+    p: P
+}
+
+impl<P> ProtoFrontEndImpl<P> where P: ProtoFsm {
+    fn new(p: P) -> ProtoFrontEndImpl<P> {
+        ProtoFrontEndImpl { q: ProtoFrontEndSourceQ::new(), accept: false, send_complete: false, p }
+    }
+
+    fn handle_a(&mut self, a: Action<P::NQ, P::UR>) -> NetAction<P::NQ> {
+        let Action { n, deliver, accept, send_complete } = a;
+        if let Some(deliver) = deliver {
+            self.q.push(deliver)
+        }
+        if let Some(send_complete) = send_complete {
+            self.send_complete = send_complete
+        }
+        if let Some(accept) = accept {
+            self.accept = accept
+        }
+        n
+    }
+}
+
+impl<P> ProtoFrontEndBase for ProtoFrontEndImpl<P> where
+    P: ProtoFsm {
+    type NQ = P::NQ;
+    type NR = P::NR;
+
+    #[inline]
+    fn handle_n(&mut self, ne: NetEvent<P::NR>) -> NetAction<P::NQ> {
+        let a = self.p.handle_n(ne);
+        self.handle_a(a)
+    }
+
+    #[inline]
+    fn take_error(&mut self) -> Result<()> {
+        self.q.take_error()
+    }
+
+    #[inline]
+    fn push_error(&mut self, e: Error) {
+        self.q.push_error(e)
+    }
+}
+
+impl<P> ProtoFrontEndSource for ProtoFrontEndImpl<P> where
+    P: ProtoFsm {
+    type UR = P::UR;
+
+    #[inline]
+    fn take_deliver(&mut self) -> Result<Async<Option<P::UR>>> {
+        self.q.take_deliver()
+    }
+}
+
+
+impl<P> ProtoFrontEndSink for ProtoFrontEndImpl<P> where
+    P: ProtoFsm {
+    type UQ = P::UQ;
+
+    fn is_accept(&self) -> bool {
+        self.accept
+    }
+
+    fn is_send_complete(&self) -> bool {
+        self.send_complete
+    }
+
+    fn handle_u(&mut self, ue: UserEvent<P::UQ>) -> NetAction<P::NQ> {
+        let a = self.p.handle_u(ue);
+        self.handle_a(a)
+    }
+}
+
+struct ProtoFrontEndSinkImpl<P> where P: ProtoFsmSink {
+    e: Option<Error>,
+    accept: bool,
+    send_complete: bool,
+    p: P
+}
+
+impl<P> ProtoFrontEndSinkImpl<P> where P: ProtoFsmSink {
+    fn new(p: P) -> ProtoFrontEndSinkImpl<P> {
+        ProtoFrontEndSinkImpl { e: None, accept: false, send_complete: false, p }
+    }
+
+    fn handle_a(&mut self, a:SinkAction<P::NQ>) -> NetAction<P::NQ> {
+        let SinkAction { n, accept, send_complete } = a;
+        if let Some(send_complete) = send_complete {
+            self.send_complete = send_complete
+        }
+        if let Some(accept) = accept {
+            self.accept = accept
+        }
+        n
+    }
+}
+
+impl<P> ProtoFrontEndBase for ProtoFrontEndSinkImpl<P> where
+    P: ProtoFsmSink {
+    type NQ = P::NQ;
+    type NR = P::NR;
+
+    #[inline]
+    fn handle_n(&mut self, ne: NetEvent<P::NR>) -> NetAction<P::NQ> {
+        let a = self.p.handle_n(ne);
+        self.handle_a(a)
+    }
+
+    #[inline]
+    fn take_error(&mut self) -> Result<()> {
+        self.e.take().map_or_else(|| Ok(()), |e| Err(e))
+    }
+
+    #[inline]
+    fn push_error(&mut self, e: Error) {
+        self.e = Some(e)
+    }
+}
+
+
+impl<P> ProtoFrontEndSink for ProtoFrontEndSinkImpl<P> where
+    P: ProtoFsmSink {
+    type UQ = P::UQ;
+
+    fn is_accept(&self) -> bool {
+        self.accept
+    }
+
+    fn is_send_complete(&self) -> bool {
+        self.send_complete
+    }
+
+    fn handle_u(&mut self, ue: UserEvent<P::UQ>) -> NetAction<P::NQ> {
+        let a = self.p.handle_u(ue);
+        self.handle_a(a)
+    }
+}
+
+
+struct ProtoFrontEndFutureImpl<P> where P: ProtoFsmSource {
+    d: Option<UserDeliver<P::UR>>,
+    p: P
+}
+
+impl<P> ProtoFrontEndBase for ProtoFrontEndFutureImpl<P> where
+    P: ProtoFsmSource {
+    type NQ = P::NQ;
+    type NR = P::NR;
+
+    #[inline]
+    fn handle_n(&mut self, ne: NetEvent<P::NR>) -> NetAction<P::NQ> {
+        let SourceAction { n, deliver } = self.p.handle_n(ne);
+        if let Some(deliver) = deliver {
+            self.d = Some(deliver)
+        }
+        n
+    }
+
+    #[inline]
+    fn take_error(&mut self) -> Result<()> {
+        if let Some(UserDeliver::Err(..)) = &self.d {
+            match self.d.take() {
+                Some(UserDeliver::Err(e)) => Err(e),
+                x =>  { self.d = x; Ok(()) }
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn push_error(&mut self, e: Error) {
+        self.d = Some(UserDeliver::Err(e))
+    }
+}
+
+impl<P> ProtoFrontEndFuture for ProtoFrontEndFutureImpl<P> where
+    P: ProtoFsmSource {
+    type UR = P::UR;
+
+    fn take_deliver(&mut self) -> Result<Async<P::UR>> {
+        match self.d.take() {
+            Some(UserDeliver::Err(e)) => Err(e),
+            Some(UserDeliver::MessageLast(ur)) | Some(UserDeliver::Message(ur)) => Ok(Async::Ready(ur)),
+            None => Ok(Async::NotReady),
+            Some(UserDeliver::EndOfStream) => Err(app_error!(other "Invalid EndOfStream in ProtoFrontEndFutureImpl"))
+        }
+    }
+}
+//====================================================================
+
+pub struct Call<NQ, NR> {
+    q: Option<NQ>,
+    nr_type: PhantomData<NR>
+}
+
+impl<NQ, NR> Call<NQ, NR> {
+    fn new(nq: NQ) ->  Call<NQ, NR> {
+        Call { q: Some(nq), nr_type: PhantomData }
+    }
+}
+
+impl<NQ, NR> ProtoFsmSource for Call<NQ, NR> where
+    NQ: Debug, NR: Debug {
+    type NQ = NQ;
+    type NR = NR;
+    type UR = NR;
+
+    fn handle_n(&mut self, ne: NetEvent<NR>) -> SourceAction<NQ, NR> {
+        fn z<NQ, NR>() -> SourceAction<NQ, NR> { SourceAction::z() }
+        match ne {
+            NetEvent::Init => self.q.take().map_or_else(|| z(), |nq| z().send(nq)),
+            NetEvent::Idle => z().recv(true),
+            NetEvent::Incoming(nr) => z().deliver_last(nr).recv(false),
+            NetEvent::Err(e) => z().err(e),
+            NetEvent::EndOfStream => z().err(app_error!(premature eof))
         }
     }
 }
 
-pub trait ProtoFsm {
+pub trait ChatF {
     type NQ: Debug;
     type NR: Debug;
-    type UQ: Debug;
     type UR: Debug;
-    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> Action<Self::NQ, Self::UR>;
-    fn handle_u(&mut self, ue: UserEvent<Self::UQ>) -> Action<Self::NQ, Self::UR>;
+    fn start(&mut self) -> Self::NQ;
+    fn next(&mut self, nr: Self::NR) -> Result<(Self::UR, Option<Self::NQ>)>;
 }
 
-//--------------------------------------------------------------------------------------------------
-
-pub struct ProtocolLayer<N, P> where
-    P: ProtoFsm,
-    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error> {
-    n: NetSide<N, <P as ProtoFsm>::NQ, <P as ProtoFsm>::NR>,
-    u: UserSide<<P as ProtoFsm>::UR>,
-    fsm: P
+pub struct Chat<F> {
+    f: F
 }
 
-impl<N, P> ProtocolLayer<N, P> where
-    P: ProtoFsm,
-    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
-    P::NQ: Debug {
-    pub fn new(io: N, fsm: P) -> ProtocolLayer<N, P> {
-        let mut rv = ProtocolLayer {
-            n: NetSide::new(io),
-            u: UserSide::new(),
-            fsm
-        };
-        rv.handle_ue(UserEvent::Init);
-        rv
+impl<F> Chat<F> {
+    fn new(f: F) ->  Chat<F> {
+        Chat { f }
     }
+}
 
-    pub fn into_inner(self) -> N { self.n.io }
+impl<F> ProtoFsmSource for Chat<F> where
+    F: ChatF {
+    type NQ = F::NQ;
+    type NR = F::NR;
+    type UR = F::UR;
 
-    fn handle_a(&mut self, a: Action<P::NQ, P::UR>) {
-        let Action { n, u } = a;
+    fn handle_n(&mut self, ne: NetEvent<Self::NR>) -> SourceAction<Self::NQ, Self::UR> {
+        fn z<NQ, NR>() -> SourceAction<NQ, NR> { SourceAction::z() }
 
-        self.u.handle_ua(u);
-        if let Some(e) = self.n.handle_na(n) {
-            self.u.push_error(e)
-        }
-
-        self.n_poll_send();
-        self.n_poll_recv();
-    }
-
-    #[inline]
-    fn handle_ne(&mut self, ne: NetEvent<P::NR>) {
-        trace!("handle_ne: event {:?}", ne);
-        let a = self.fsm.handle_n(ne);
-        trace!("handle_ne: action {:?}", a);
-        self.handle_a(a)
-    }
-    #[inline]
-    fn handle_ue(&mut self, ue: UserEvent<P::UQ>) {
-
-        trace!("handle_ue: event {:?}", ue);
-        let a = self.fsm.handle_u(ue);
-        trace!("handle_ue: action {:?}", a);
-        //let a = trace_ar!("handle_ue", ue, self.fsm.handle_u(ue));
-        self.handle_a(a)
-    }
-
-    #[inline]
-    fn n_poll_recv(&mut self) {
-        if let Some(ne) = self.n.poll_recv() {
-            self.handle_ne(ne)
-        }
-    }
-
-    #[inline]
-    fn n_poll_send(&mut self) {
-        if let Some(ne) = self.n.poll_send() {
-            self.handle_ne(ne)
+        match ne {
+            NetEvent::Init => z().send(self.f.start()),
+            NetEvent::Idle => z().recv(true),
+            NetEvent::Incoming(nr) => match self.f.next(nr) {
+                Ok((ur, Some(nq))) => z().recv(false).send(nq).deliver(ur),
+                Ok((ur, None)) => z().recv(false).deliver_last(ur),
+                Err(e) => z().err(e)
+            }
+            NetEvent::Err(e) => z().err(e),
+            NetEvent::EndOfStream => z().err(app_error!(premature eof))
         }
     }
 }
 
-impl<N, P> Stream for ProtocolLayer<N, P> where
-    P: ProtoFsm,
-    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
-    P::NQ: Debug {
-    type Item = P::UR;
-    type Error = Error;
-    fn poll(&mut self) -> Result<Async<Option<P::UR>>> {
-        self.n_poll_recv();
-        self.n_poll_send();
-        self.u.take_deliver()
+pub mod call {
+    use super::*;
+    use futures::prelude::*;
+    pub type T<N, NQ, NR> = ProtoLayer<N, ProtoFrontEndSourceImpl<Call<NQ, NR>>>;
+    pub fn new<N, NQ, NR>(io: N, nq: NQ) -> T<N, NQ, NR> where
+        N: Sink<SinkItem=NQ, SinkError=Error> + Stream<Item=NR, Error=Error>,
+        NQ: Debug, NR: Debug {
+        ProtoLayer::new(io, ProtoFrontEndSourceImpl::new(Call::new(nq)))
     }
 }
 
-impl<N, P> Sink for ProtocolLayer<N, P> where
-    P: ProtoFsm,
-    N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
-    P::NQ: Debug{
-    type SinkItem = P::UQ;
-    type SinkError = Error;
-    fn start_send(&mut self, req: P::UQ) -> Result<AsyncSink<P::UQ>> {
-        let rv = if self.u.accept {
-            self.handle_ue(UserEvent::Message(req));
-            AsyncSink::Ready
-        } else {
-            AsyncSink::NotReady(req)
-        };
-        self.u.take_error().map(|_| rv)
+pub mod chat {
+    use super::*;
+    use futures::prelude::*;
+    pub type T<N, F> = ProtoLayer<N, ProtoFrontEndSourceImpl<Chat<F>>>;
+    pub fn new<N, F>(io: N, f: F) -> T<N, F> where
+        N: Sink<SinkItem=F::NQ, SinkError=Error> + Stream<Item=F::NR, Error=Error>,
+        F: ChatF {
+        ProtoLayer::new(io, ProtoFrontEndSourceImpl::new(Chat::new(f)))
+    }
+}
+
+pub mod layer {
+    use super::*;
+    use futures::prelude::*;
+    pub type T<N, P> = ProtoLayer<N, ProtoFrontEndImpl<P>>;
+    pub fn new<N, P>(io: N, p: P) -> T<N, P> where
+        N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
+        P: ProtoFsm {
+        ProtoLayer::new(io, ProtoFrontEndImpl::new(p))
+    }
+}
+
+pub mod source_layer {
+    use super::*;
+    use futures::prelude::*;
+    pub type T<N, P> = ProtoLayer<N, ProtoFrontEndSourceImpl<P>>;
+    pub fn new<N, P>(io: N, p: P) -> T<N, P> where
+        N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
+        P: ProtoFsmSource {
+        ProtoLayer::new(io, ProtoFrontEndSourceImpl::new(p))
+    }
+}
+
+
+pub mod async_io {
+    use super::*;
+    use futures::prelude::*;
+    use tokio_io::AsyncRead;
+    use std::io::{Read, ErrorKind};
+    use bytes::Bytes;
+
+    pub struct AsyncReadStream<S> {
+        s: S,
+        b: Bytes
     }
 
-    fn poll_complete(&mut self) -> Result<Async<()>> {
-        if !self.u.send_complete {
-            self.handle_ue(UserEvent::Flush);
+    impl<S> AsyncReadStream<S> {
+        pub fn new(s: S) -> AsyncReadStream<S> { AsyncReadStream { s, b: Bytes::new() } }
+        pub fn decons(self) -> (S, Bytes) { (self.s, self.b) }
+        fn fill_buffer(&mut self, buf: &mut [u8]) -> usize {
+            if self.b.is_empty() {
+                0
+            } else {
+                let l = self.b.len().min(buf.len());
+                let b = self.b.split_to(l);
+                buf[0..l].copy_from_slice(&b[..]);
+                l
+            }
         }
-        self.u.take_error().map(|_| if self.u.send_complete {
-            Async::Ready(())
-        } else {
-            Async::NotReady
-        })
     }
-    fn close(&mut self) -> Result<Async<()>> {
-        self.poll_complete()
-    }
-}
 
-//---------------------------------------------------
-
-#[derive(Debug)]
-enum RmrState {
-    Sending,
-    Flushing,
-    Receiving,
-    EndOfStream
-}
-
-/// 'Request => Multiple Responses' behavior. Sends `()` to the underlying stream, then expects
-/// a number of `R` messages in response. Responses are read up to and including the last one which
-/// `into().1` yields to true for.
-
-pub struct ReqMultiResp<S, R, RR> {
-    state: RmrState,
-    s: S,
-    into: fn(R) -> (RR, bool),
-    r_type: PhantomData<R>,
-    rr_type: PhantomData<RR>
-}
-
-impl<S, R, RR> ReqMultiResp<S, R, RR> {
-    pub fn new(s: S, into: fn(R) -> (RR, bool)) -> ReqMultiResp<S, R, RR> {
-        ReqMultiResp { s, into, state: RmrState::Sending, r_type: PhantomData, rr_type: PhantomData }
-    }
-    pub fn into_inner(self) -> S { self.s }
-}
-
-impl<S, R, RR> Stream for ReqMultiResp<S, R, RR> where
-    S: Stream<Item=R, Error=Error> + Sink<SinkItem=(), SinkError=Error>,
-    RR: Debug
-{
-    type Item = RR;
-    type Error = Error;
-
-    fn poll(&mut self) -> Result<Async<Option<RR>>> {
-        loop {
-            let op = match &self.state {
-                RmrState::Sending => match self.s.start_send(()) {
-                    Ok(AsyncSink::Ready) => SxV::S(RmrState::Flushing),
-                    Ok(AsyncSink::NotReady(_)) => SxV::V(Ok(Async::NotReady)),
-                    Err(e) => SxV::V(Err(e))
-                }
-                RmrState::Flushing => match self.s.poll_complete() {
-                    Ok(Async::Ready(())) => SxV::S(RmrState::Receiving),
-                    Ok(Async::NotReady) => SxV::V(Ok(Async::NotReady)),
-                    Err(e) => SxV::V(Err(e))
-                }
-                RmrState::Receiving => match self.s.poll() {
-                    Ok(Async::Ready(Some(v))) => {
-                        let (w, is_last): (RR, bool) = (self.into)(v);
-                        if is_last {
-                            //futures::task::current().notify();
-                            SxV::SV(RmrState::EndOfStream, Ok(Async::Ready(Some(w))))
-                        } else {
-                            SxV::V(Ok(Async::Ready(Some(w))))
-                        }
+    impl<S> Read for AsyncReadStream<S> where S: Stream<Item=Bytes, Error=Error> {
+        fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+            let l = self.fill_buffer(buf);
+            if l > 0 {
+                Ok(l)
+            } else {
+                match self.s.poll() {
+                    Ok(Async::Ready(Some(b))) => {
+                        self.b = b;
+                        Ok(self.fill_buffer(buf))   //if b is empty, it's over
                     }
-                    Ok(Async::Ready(None)) => SxV::V(Err(app_error!(premature eof))),
-                    Ok(Async::NotReady) => SxV::V(Ok(Async::NotReady)),
-                    Err(e) => SxV::V(Err(e))
-                }
-                RmrState::EndOfStream =>
-                    SxV::V(Ok(Async::Ready(None)))
-            };
-            trace!("ReqMultiResp: {:?} => {:?}", self.state, op);
-            match op {
-                SxV::S(s) => self.state = s,
-                SxV::V(v) => break v,
-                SxV::SV(s, v) => {
-                    self.state = s;
-                    break v
+                    Ok(Async::Ready(None)) =>
+                        Err(IoError::new(ErrorKind::BrokenPipe, app_error!(premature eof))),
+                    Ok(Async::NotReady) =>
+                        Err(ErrorKind::WouldBlock.into()),
+                    Err(e) =>
+                        Err(e.into())
                 }
             }
         }
     }
+
+    impl<S> AsyncRead for AsyncReadStream<S> where S: Stream<Item=Bytes, Error=Error> { }
+
 }
 
-
-
-
-/*
-mod p2 {
-    use *;
-    use futures::prelude::*;
-
-    enum Branch<A, B> {
-        Proceed(A),
-        Return(B),
-        Error(Error)
-    }
-
-    pub trait ProtoFsm {
-        type NQ;
-        type NR;
-        type UQ;
-        type UR;
-
-        fn uq(uq: Self::UQ) -> Branch<Self::NQ, AsyncSink<Self::UQ>>;
-        fn uq_r(uqr: Result<AsyncSink<Self::NQ>>) -> Result<AsyncSink<Self::UQ>>;
-        fn flush() -> Branch<(), Async<()>>;
-        fn flush_r(Result<Async<()>>) -> Result<Async<()>>;
-        fn poll() -> Branch<(), Async<Option<Self::UR>>>;
-        fn poll_r(r: Async<Option<Self::NR>>) -> Async<Option<Self::UR>>;
-    }
-
-    pub struct ProtocolLayer<N, P> where
-        P: ProtoFsm,
-        N: Sink<SinkItem=P::NQ, SinkError=IoError> + Stream<Item=P::NR, Error=IoError> {
-        n: N,
-        fsm: P
-    }
-}
-*/
