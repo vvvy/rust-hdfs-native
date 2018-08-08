@@ -196,23 +196,43 @@ fn build_copy_list(mut fs: Vec<String>) -> Result<Vec<(String, PathBuf)>> {
 }
 
 
-fn get(mut mdx: Mdx, args: args::Get) -> Result<()> {
+fn get(mdx: Mdx, args: args::Get) -> Result<()> {
     use tokio::fs::File;
 
     let copy_vec = build_copy_list(args.fs)?;
 
+    let f =
+        futures::stream::iter_ok(copy_vec).fold(mdx, |mdx, (src, dst)| {
+        debug!("Copying {} -> {}", src, dst.display());
+        let wf = File::create(dst);
+        let r = hdfs::get(mdx, src);
+        wf.and_then(|w|
+            tokio::io::copy(r, w)
+        ).map(|(count, r, _)| {
+            debug!("{} bytes written", count);
+            r.decons().0.into_inner()
+        })
+    });
+
+    tokio::run(f.map(|_| ()).map_err(|e: IoError| eprintln!("Error: {}", e)));
+    Ok(())
+
     //TODO add some parallelism here
+
+
+/*
+
     for (src, dst) in copy_vec {
         debug!("Copying {} -> {}", src, dst.display());
         let wf = File::create(dst);
         let r = hdfs::get(mdx, src);
         let f = wf.and_then(|w| tokio::io::copy(r, w));
-        let (count, r, _) = f.wait()?;
+        let (count, r, _) = tokio::run(f)?;
         debug!("{} bytes written", count);
         mdx = r.decons().0.into_inner();
     }
 
-    Ok(())
+    Ok(())*/
 }
 
 fn version() -> ! {

@@ -154,8 +154,8 @@ enum GetFsmEvent {
     Init,
     /// Acknowledge reception of the packet. Arg is `data_len`.
     PacketAck(u64),
-    /// Signal that there was an error receiving the packet (CRC or whatever else)
-    PacketError,
+    /// Signal that there was an error, probably receiving the packet (CRC or whatever else)
+    Err(Error),
     /// End of stream has been received when reading a block
     BlockComplete,
     /// Block locations have been received
@@ -300,8 +300,13 @@ impl GetFsm {
         use self::GetFsmAction as A;
 
         match evt {
-            E::Init | E::BlockComplete | E::PacketError =>
+            E::Init | E::BlockComplete =>
                 self.next_block(),
+            E::Err(e) => if self.q.is_empty() {
+                A::Err(e)
+            } else {
+                self.next_block()
+            }
             E::BlockLocations(blocks) =>
                 if blocks.is_empty() {
                     A::Err(app_error!(other "invalid empty BlockLocations"))
@@ -426,7 +431,7 @@ impl ProtoFsmSource for Get {
                 }
             NetEvent::Incoming(MdxR::DT(_, DtaR::Data(bytes))) =>
                 if !bytes.is_empty() {
-                    SourceAction::z().deliver(bytes)
+                    self.handle_t(GetFsmEvent::PacketAck(bytes.len() as u64)).deliver(bytes)
                 } else {
                     self.handle_t(GetFsmEvent::BlockComplete)
                 }
@@ -435,7 +440,7 @@ impl ProtoFsmSource for Get {
             NetEvent::Idle =>
                 SourceAction::z(),
             NetEvent::Err(e) =>
-                SourceAction::z().err(e),
+                self.handle_t(GetFsmEvent::Err(e)),
             NetEvent::EndOfStream =>
                 SourceAction::z().err(app_error!(premature eof))
         }
@@ -449,7 +454,7 @@ pub fn get_part_stream(mdx: Mdx, src: String, start_offset: u64, end_offset: u64
 }
 
 pub fn get_stream(mdx: Mdx, src: String) -> GetStream {
-    get_part_stream(mdx, src, 0, u64::max_value())
+    get_part_stream(mdx, src, 0, i64::max_value() as u64)
 }
 
 pub type GetAsyncRead = async_io::AsyncReadStream<GetStream>;
