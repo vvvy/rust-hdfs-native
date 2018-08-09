@@ -208,6 +208,7 @@ pub enum DtQ {
     Packet(BlockDataPacket)
 }
 
+/*
 impl DtQ {
     pub fn set_client_name(&mut self, client_name: &str) {
         match self {
@@ -218,6 +219,7 @@ impl DtQ {
         }
     }
 }
+*/
 
 #[derive(Debug)]
 pub enum DtR {

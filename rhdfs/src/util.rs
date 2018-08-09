@@ -271,7 +271,7 @@ pub fn trace_arg_result<A: Debug, R: Debug>(comment: &'static str, a: A, f: impl
 
 
 macro_rules! trace_ar {
-    { $comment:expr, $a:expr, $r:expr } => { {
+    { $comment:tt: ($a:expr) $r:expr } => { {
         use log::Level::Trace;
         if log_enabled!(Trace) {
             let s_a = format!("{:?}", $a);
@@ -282,7 +282,7 @@ macro_rules! trace_ar {
             $r
         }
     } };
-    { $comment:expr, $s:expr, $a:expr, $r:expr } => { {
+    { $comment:tt: $s:expr => ($a:expr) $r:expr } => { {
         use log::Level::Trace;
         if log_enabled!(Trace) {
             let (s_s, s_a) = (format!("{:?}", $s), format!("{:?}", $a));

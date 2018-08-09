@@ -79,7 +79,7 @@ impl<NQ> SinkAction<NQ> {
     #[inline]
     pub fn send_complete(self, v: bool) -> SinkAction<NQ> { SinkAction { send_complete: Some(v), ..self } }
     #[inline]
-    pub fn bits(self, recv: bool, accept: bool, send_complete: bool) -> SinkAction<NQ> {
+    pub fn bits(self, (recv, accept, send_complete): (bool, bool, bool)) -> SinkAction<NQ> {
         self.recv(recv).accept(accept).send_complete(send_complete)
     }
 }
@@ -133,7 +133,7 @@ impl<NQ, UR> Action<NQ, UR> {
     #[inline]
     pub fn send_complete(self, v: bool) -> Action<NQ, UR> { Action { send_complete: Some(v), ..self } }
     #[inline]
-    pub fn bits(self, recv: bool, accept: bool, send_complete: bool) -> Action<NQ, UR> {
+    pub fn bits(self, (recv, accept, send_complete): (bool, bool, bool)) -> Action<NQ, UR> {
         self.recv(recv).accept(accept).send_complete(send_complete)
     }
     #[inline]
@@ -159,14 +159,14 @@ macro_rules! proto_action_inner {
 
 #[macro_export]
 macro_rules! proto_bits {
-    ($a:expr, +recv, +accept, +send_complete) => { $a.bits(true, true, true) };
-    ($a:expr, -recv, +accept, +send_complete) => { $a.bits(false, true, true) };
-    ($a:expr, +recv, -accept, +send_complete) => { $a.bits(true, false, true) };
-    ($a:expr, -recv, -accept, +send_complete) => { $a.bits(false, false, true) };
-    ($a:expr, +recv, +accept, -send_complete) => { $a.bits(true, true, false) };
-    ($a:expr, -recv, +accept, -send_complete) => { $a.bits(false, true, false) };
-    ($a:expr, +recv, -accept, -send_complete) => { $a.bits(true, false, false) };
-    ($a:expr, -recv, -accept, -send_complete) => { $a.bits(false, false, false) };
+    (+recv, +accept, +send_complete) => { (true, true, true) };
+    (-recv, +accept, +send_complete) => { (false, true, true) };
+    (+recv, -accept, +send_complete) => { (true, false, true) };
+    (-recv, -accept, +send_complete) => { (false, false, true) };
+    (+recv, +accept, -send_complete) => { (true, true, false) };
+    (-recv, +accept, -send_complete) => { (false, true, false) };
+    (+recv, -accept, -send_complete) => { (true, false, false) };
+    (-recv, -accept, -send_complete) => { (false, false, false) };
 }
 
 
@@ -637,7 +637,7 @@ impl<P> ProtoFrontEndSink for ProtoFrontEndImpl<P> where
     }
 }
 
-struct ProtoFrontEndSinkImpl<P> where P: ProtoFsmSink {
+pub struct ProtoFrontEndSinkImpl<P> where P: ProtoFsmSink {
     e: Option<Error>,
     accept: bool,
     send_complete: bool,
@@ -827,7 +827,6 @@ impl<F> ProtoFsmSource for Chat<F> where
 
 pub mod call {
     use super::*;
-    use futures::prelude::*;
     pub type T<N, NQ, NR> = ProtoLayer<N, ProtoFrontEndSourceImpl<Call<NQ, NR>>>;
     pub fn new<N, NQ, NR>(io: N, nq: NQ) -> T<N, NQ, NR> where
         N: Sink<SinkItem=NQ, SinkError=Error> + Stream<Item=NR, Error=Error>,
@@ -838,7 +837,6 @@ pub mod call {
 
 pub mod chat {
     use super::*;
-    use futures::prelude::*;
     pub type T<N, F> = ProtoLayer<N, ProtoFrontEndSourceImpl<Chat<F>>>;
     pub fn new<N, F>(io: N, f: F) -> T<N, F> where
         N: Sink<SinkItem=F::NQ, SinkError=Error> + Stream<Item=F::NR, Error=Error>,
@@ -849,7 +847,6 @@ pub mod chat {
 
 pub mod layer {
     use super::*;
-    use futures::prelude::*;
     pub type T<N, P> = ProtoLayer<N, ProtoFrontEndImpl<P>>;
     pub fn new<N, P>(io: N, p: P) -> T<N, P> where
         N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
@@ -860,7 +857,6 @@ pub mod layer {
 
 pub mod source_layer {
     use super::*;
-    use futures::prelude::*;
     pub type T<N, P> = ProtoLayer<N, ProtoFrontEndSourceImpl<P>>;
     pub fn new<N, P>(io: N, p: P) -> T<N, P> where
         N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
@@ -869,12 +865,20 @@ pub mod source_layer {
     }
 }
 
+pub mod sink_layer {
+    use super::*;
+    pub type T<N, P> = ProtoLayer<N, ProtoFrontEndSinkImpl<P>>;
+    pub fn new<N, P>(io: N, p: P) -> T<N, P> where
+        N: Sink<SinkItem=P::NQ, SinkError=Error> + Stream<Item=P::NR, Error=Error>,
+        P: ProtoFsmSink {
+        ProtoLayer::new(io, ProtoFrontEndSinkImpl::new(p))
+    }
+}
 
 pub mod async_io {
     use super::*;
-    use futures::prelude::*;
-    use tokio_io::AsyncRead;
-    use std::io::{Read, ErrorKind};
+    use tokio_io::{AsyncRead, AsyncWrite};
+    use std::io::{Read, Write, ErrorKind};
     use bytes::Bytes;
 
     pub struct AsyncReadStream<S> {
@@ -909,7 +913,7 @@ pub mod async_io {
                         Ok(self.fill_buffer(buf))   //if b is empty, it's over
                     }
                     Ok(Async::Ready(None)) =>
-                        Err(IoError::new(ErrorKind::BrokenPipe, app_error!(premature eof))),
+                        Ok(self.fill_buffer(buf)),
                     Ok(Async::NotReady) =>
                         Err(ErrorKind::WouldBlock.into()),
                     Err(e) =>
@@ -921,5 +925,30 @@ pub mod async_io {
 
     impl<S> AsyncRead for AsyncReadStream<S> where S: Stream<Item=Bytes, Error=Error> { }
 
+
+    pub struct AsyncWriteSink<S> {
+        s: S,
+        b: Bytes
+    }
+
+    impl<S> AsyncWriteSink<S> {
+        pub fn new(s: S) -> AsyncWriteSink<S> { AsyncWriteSink { s, b: Bytes::new() } }
+    }
+
+    impl<S> Write for AsyncWriteSink<S> where S: Sink<SinkItem=Bytes, SinkError=Error> {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            unimplemented!()
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            unimplemented!()
+        }
+    }
+
+    impl<S> AsyncWrite for AsyncWriteSink<S> where S: Sink<SinkItem=Bytes, SinkError=Error> {
+        fn shutdown(&mut self) -> IoResult<Async<()>> {
+            unimplemented!()
+        }
+    }
 }
 

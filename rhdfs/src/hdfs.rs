@@ -14,12 +14,6 @@ pub use cmdx::Mdx;
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct PartialListingMessage {
-    fs: Vec<HdfsFileStatusProto>,
-    last: bool
-}
-
-#[derive(Debug)]
 pub struct GetListingState {
     source: String,
     need_location: bool
@@ -145,7 +139,10 @@ fn test_get_listing() {
 
 }
 
-//==================================================================================================
+//--------------------------------------------------------------------------------------------------
+// Get command
+//--------------------------------------------------------------------------------------------------
+
 use bytes::Bytes;
 use std::collections::VecDeque;
 use dt::ReadBlock;
@@ -246,8 +243,8 @@ impl LocatedBlock {
         } else {
             //error -- gap between blocks. NN corruption.
             GetFsmAction::Err(app_error!(other
-            "Read pointer falls behind the current block in chain (gap between blocks) on {:?}: \
-            current block's range: [{}, {}), requested range [{}, {})",
+            "Current block in chain falls behind the read pointer (gap between blocks) on {:?}: \
+            current block's range: [{}, {}), read range [{}, {})",
                 self.b, lb, ub, read_offset, max_read_offset
             ))
         }
@@ -347,7 +344,7 @@ impl Get {
             use std::net::{SocketAddr, IpAddr};
             use std::str::FromStr;
 
-            let (uuid, ip, port) = datanode_info.into_xfer_info();
+            let (_uuid, ip, port) = datanode_info.into_xfer_info();
             let ip = IpAddr::from_str(&ip).map_err(|e| app_error!(other "Could not parse DN IP `{}`: `{}`", ip, e))?;
             let addr = SocketAddr::new(ip, port as u16);
             Ok(MdxQ::DT(0, Some(addr), dt::DtaQ::ReadBlock(read_block)))
@@ -388,7 +385,7 @@ impl Get {
 
         self.fsm.adjust_max_read_offset(file_length);
 
-        blocks.into_iter().fold(Ok(Vec::new()), |mut r, block| {
+        blocks.into_iter().fold(Ok(Vec::new()), |r, block| {
             if let Ok(r) = r {
                 let (
                     b, offset, locs, corrupt, block_token //, _is_cached, _storage_types, _storage_ids
@@ -447,6 +444,9 @@ impl ProtoFsmSource for Get {
     }
 }
 
+const MAX_FILE_LENGTH: u64 = std::i64::MAX as u64;
+
+
 pub type GetStream = source_layer::T<Mdx, Get>;
 
 pub fn get_part_stream(mdx: Mdx, src: String, start_offset: u64, end_offset: u64) -> GetStream {
@@ -454,7 +454,7 @@ pub fn get_part_stream(mdx: Mdx, src: String, start_offset: u64, end_offset: u64
 }
 
 pub fn get_stream(mdx: Mdx, src: String) -> GetStream {
-    get_part_stream(mdx, src, 0, i64::max_value() as u64)
+    get_part_stream(mdx, src, 0, MAX_FILE_LENGTH)
 }
 
 pub type GetAsyncRead = async_io::AsyncReadStream<GetStream>;
@@ -465,303 +465,46 @@ pub fn get(mdx: Mdx, src: String) -> GetAsyncRead {
 
 
 
-/*
-
-macro_rules! expect_response {
-    { $v:expr, $p:pat, $e:expr } => {
-        if let $p = $v {
-            Ok($e)
-        } else {
-            Err(app_error!(other "unexpected response, expected `{}`, got `{:?}`", stringify!($p), $v).into())
-        }
-    };
-}
-
-
-
-
-//--------------------------------------------------------------------------------------------------
-// Get command
-//--------------------------------------------------------------------------------------------------
-
-const MAX_FILE_LENGTH: u64 = std::i64::MAX as u64;
-
-fn get_block_locations_request(src: String, offset: u64, length: u64) -> NnQ {
-    let q = pb_cons!{GetBlockLocationsRequestProto,
-        src: src,
-        offset: offset,
-        length: length
-    };
-    nn::NnQ::GetBlockLocations(q)
-}
-
-fn  get_block_locations_result(r: nn::NnR) -> IoResult<LocatedBlocksProto> {
-    expect_nn_response!(r, NnR::GetBlockLocations(gbl), pb_decons!(GetBlockLocationsResponseProto, gbl, locations))
-}
-
-pub fn get_block_locations(rc: &ReactorClient, src: String, offset: u64, length: u64) -> BFI<LocatedBlocksProto> {
-    let q = pb_cons!{GetBlockLocationsRequestProto,
-        src: src,
-        offset: offset,
-        length: length
-    };
-    Box::new(rc.call_nn(nn::NnQ::GetBlockLocations(q)).and_then(move |r|
-        if let NnR::GetBlockLocations(gbl) = r {
-            let locs = pb_decons!(GetBlockLocationsResponseProto, gbl, locations);
-            Ok(locs)
-        } else {
-            Err(app_error!(other "Unexpected response type").into())
-        }
-    ))
-}
-
-
-#[derive(Debug)]
-struct LocatedBlock {
-    /// Offset of the block within the file
-    o: u64,
-    b: ExtendedBlockProto,
-    t: TokenProto,
-    /// remaining datanodes
-    locs: VecDeque<DatanodeInfoProto>
-}
-
-#[derive(Debug)]
-enum GBLS {
-    Idle,
-    GetBlockLocations
-}
-
-#[derive(Debug)]
-enum GBS {
-    Idle(File),
-    GetBlock { b: LocatedBlock, offset: u64, len: u64 }
-}
-
-#[derive(Debug)]
-pub struct Get {
-    /// Source file path
-    src: String,
-    /// file position read successfully so far. This is at a block boundary or at the end.
-    read_offset: u64,
-    /// Upper bound of `read_offset`.
-    max_read_offset: u64,
-    /// committed output file position. This is at a block boundary.
-    /// Seek here to restart the current block
-    write_offset: usize,
-    /// queue of file blocks.
-    q: VecDeque<LocatedBlock>,
-    /// state
-    s: (GBLS, GBS),
-    /// done indicator
-    finished: bool
-}
-
-type GetOperation = ReactorOperation<nn::CallW, dt::ReadBlock<File>>;
-
-impl Get {
-    pub fn new(src: String, dst: File) -> Get { Get {
-        src,
-        read_offset: 0,
-        max_read_offset: MAX_FILE_LENGTH,
-        write_offset: 0,
-        q: VecDeque::new(),
-        s: (GBLS::Idle, GBS::Idle(dst)),
-        finished: false
-    } }
-
-    //fn with_error(self, e: Error) -> Self { Get { err: vec_cons(self.err, e.into()), ..self } }
-
-    fn idle(mut self) -> (Option<IoResult<GetOperation>>, Self) {
-        match self.s {
-            (GBLS::Idle, GBS::Idle(w)) =>
-                if self.read_offset < self.max_read_offset {
-                    //there are remaining blocks to read
-                    let remainder = self.max_read_offset - self.read_offset;
-                    let (req, s1) = match self.q.pop_front() {
-                        Some(mut lb) => {
-                            let len = pb_get!(ExtendedBlockProto, lb.b, num_bytes);
-                            let len = len.min(remainder);
-                            //TODO fix 0
-                            let offset = 0;
-                            let req = Self::send_read_block(&mut lb, offset, len, w);
-                            (req, (GBLS::Idle, GBS::GetBlock { b: lb, offset, len }))
-                        }
-                        None => {
-                            //queue is empty, so refill
-                            let req = Self::send_get_block_locations(self.src.clone(), self.read_offset, remainder);
-                            (req, (GBLS::GetBlockLocations, GBS::Idle(w)))
-                        }
-                    };
-                    (Some(req), Self { s: s1, ..self  })
-                } else {
-                    //Game over
-                    (None, Self { s: (GBLS::Idle, GBS::Idle(w)), finished: true, ..self })
-                }
-            s =>
-                (None, Self { s, ..self })
-        }
-    }
-
-    fn gblr(mut self, rlbp: IoResult<LocatedBlocksProto>) -> (Option<IoResult<GetOperation>>, Self) {
-       let s = match self.s {
-            (GBLS::GetBlockLocations, gbs) => {
-                let lbp = match rlbp {
-                    Ok(lbp) => lbp,
-                    Err(e) => return (Some(Err(e)), Get { s:(GBLS::GetBlockLocations, gbs), ..self} )
-                };
-
-                let (
-                    file_length, blocks
-                    //, _under_construction, _last_block, _is_last_block_complete, _file_encryption_info
-                ) = pb_decons!(LocatedBlocksProto, lbp,
-                    file_length, blocks
-                    //, under_construction, last_block, is_last_block_complete, file_encryption_info
-                    );
-
-                self.max_read_offset = file_length.min(self.max_read_offset);
-                for blk in blocks.into_iter() {
-                    let (
-                        b, offset, locs, corrupt, block_token //, _is_cached, _storage_types, _storage_ids
-                    ) = pb_decons!(LocatedBlockProto, blk,
-                        b, offset, locs, corrupt, block_token //, is_cached, storage_types, storage_ids
-                        );
-                    if corrupt { return (
-                        Some(Err(app_error!(other "All instances of block {:?} are corrupt", b).into())),
-                        Get { s: (GBLS::GetBlockLocations, gbs), ..self }
-                    )}
-                    //TODO these should be moved rather than cloned. Consider `take_b()` etc.
-                    self.q.push_back(LocatedBlock {
-                        o: offset,
-                        b,
-                        t: block_token,
-                        locs: {
-                            let o: Vec<DatanodeInfoProto> = locs.into_iter().map(|w| w.clone()).collect();
-                            o.into()
-                        }
-                    });
-                }
-                (GBLS::Idle, gbs)
-            }
-            s => {
-                return (Some(Err(app_error!(other "Unexpected GBLS::Idle/gblr").into())), Self { s, ..self })
-            }
-        };
-        Self { s, ..self }.idle()
-    }
-
-    fn rbr(mut self, rb: dt::ReadBlock<File>) -> (Option<IoResult<GetOperation>>, Self) {
-        let dt::BlockReadState { w, read_position: _ } = rb.state();
-
-        let s = match self.s {
-            (gbls, GBS::GetBlock { b:_, offset:_, len }) => {
-                self.read_offset += len;
-                self.write_offset += len as usize;
-                (gbls, GBS::Idle(w))
-            },
-            s => return (Some(Err(app_error!(other "Invalid /rbr").into())), Self { s, ..self })
-        };
-        Self { s, ..self }.idle()
-    }
-
-    fn send_get_block_locations(src: String, offset: u64, len: u64) -> IoResult<GetOperation> {
-        trace!("Get: sending get_block_locations_request({}, {}, {})", src, offset, len);
-        Ok(GetOperation::for_nn(nn::CallW::new(
-            get_block_locations_request(src, offset, len)
-        )))
-    }
-
-    fn send_read_block(lb: &mut LocatedBlock, offset: u64, len: u64, w: File) -> IoResult<GetOperation> {
-        if let Some(dni) = lb.locs.pop_front() {
-            Self::send_read_block_int(
-                lb.b.clone(),
-                lb.t.clone(),
-                dni,
-                offset,
-                len,
-                w
-            )
-        } else {
-            Err(app_error!(other "Unable to retrieve block {:?}, no locations left", lb.b).into())
-        }
-    }
-
-    fn send_read_block_int(b: ExtendedBlockProto, t: TokenProto, dni: DatanodeInfoProto, offset: u64, len: u64, w: File) -> IoResult<GetOperation> {
-        use std::net::{SocketAddr, IpAddr};
-        use std::str::FromStr;
-        let dnid = pb_decons!(DatanodeInfoProto, dni, id);
-        let (uuid, ip, port) = pb_decons!(DatanodeIDProto, dnid, datanode_uuid, ip_addr, xfer_port);
-        let ip = IpAddr::from_str(&ip).map_err(|e| app_error!(other "Could not parse DN IP `{}`: `{}`", ip, e) as Error)?;
-        let addr = SocketAddr::new(ip, port as u16);
-        let bhp = pb_cons!(BaseHeaderProto, block: b, token: t);
-        trace!("Get: sending read_block_request(uuid={}, addr={}, b={:?}, offset={}, num_bytes={})", uuid, addr, bhp, offset, len);
-        Ok(GetOperation::for_dt(
-            uuid.to_owned(), addr,
-            dt::ReadBlock::new(bhp, offset, len, w)
-        ))
-    }
-
-    /// Converts result into the generic form
-    fn c_result(a: (Option<IoResult<GetOperation>>, Self)) -> (Result<Option<GetOperation>>, Self) {
-        match a {
-            (Some(Ok(op)), sf) => (Ok(Some(op)), sf),
-            (Some(Err(e)), sf) => (Err(e.into()), sf),
-            (None, sf) => (Ok(None), sf)
-        }
-    }
-}
-
-impl ReactorProtocolFsm for Get {
-    type FN = nn::CallW;
-    type FD = dt::ReadBlock<File>;
-
-    fn start(self) -> (Result<Option<GetOperation>>, Self) {
-        Self::c_result(self.idle())
-    }
-
-    fn complete(self, op: GetOperation) -> (Result<Option<GetOperation>>, Self) {
-        match op {
-            ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(nn::CallW::R(r)) } => {
-                let r = get_block_locations_result(r);
-                trace!("Get: received get_block_locations_result: {:?}", r);
-                Self::c_result(self.gblr(r))
-            }
-            ReactorOperation { key: _, addr: _, p: CProtocolFsm::DT(rb) } => {
-                trace!("Get: received resulting ReadBlock: {:?}", rb);
-                Self::c_result(self.rbr(rb))
-            }
-            o =>
-                (Err(app_error!(other "Invalid RO result {:?}", o)), self)
-        }
-    }
-
-    fn error(self, e: Error, op: GetOperation) -> (Result<Option<GetOperation>>, Self) {
-        error!("Get: error on: {:?}", op);
-        match op {
-            //ReactorOperation { key: _, addr: _, p: CProtocolFsm::NN(_ /*nn::CallW::Null*/) } => {
-            //    (Err(e), self)
-            //}
-            ReactorOperation { key: _, addr: _, p: CProtocolFsm::DT(rb) } => {
-                let dt::BlockReadState { w, read_position: _ } = rb.state();
-                //TODO: switch to next datanode, resume
-                // (gbls, GBS::GetBlock { b, offset, len }) =>
-                //w.position(self.write_offset)
-                //(gbls, GBS::GetBlock { b, offset, len })
-                (Err(e), Self { s: (GBLS::Idle, GBS::Idle(w)), finished: true, ..self })
-            }
-            _ =>
-                (Err(e), self)
-        }
-    }
-}
-
-pub fn get(rc: ReactorClient, src: String, dst: File) -> BFTET<(ReactorClient, Get)> {
-     rc.run(Get::new(src, dst))
-}
-
-
 
 //--------------------------------------------------------------------------------------------------
 // Put command
 //--------------------------------------------------------------------------------------------------
-*/
+
+struct PutFsm {
+
+}
+
+pub struct Put {
+    dst: String
+}
+
+impl Put {
+    fn new(dst: String) -> Put { Put { dst }}
+}
+
+
+impl ProtoFsmSink for Put {
+    type NQ = MdxQ;
+    type NR = MdxR;
+    type UQ = Bytes;
+
+    fn handle_n(&mut self, ne: NetEvent<<Self as ProtoFsmSink>::NR>) -> SinkAction<<Self as ProtoFsmSink>::NQ> {
+        unimplemented!()
+    }
+
+    fn handle_u(&mut self, ue: UserEvent<<Self as ProtoFsmSink>::UQ>) -> SinkAction<<Self as ProtoFsmSink>::NQ> {
+        unimplemented!()
+    }
+}
+
+pub type PutSink = sink_layer::T<Mdx, Put>;
+
+pub fn put_sink(mdx: Mdx, dst: String) -> PutSink {
+    sink_layer::new(mdx, Put::new(dst))
+}
+
+pub type PutAsyncWrite = async_io::AsyncWriteSink<PutSink>;
+
+pub fn put(mdx: Mdx, dst: String) -> PutAsyncWrite {
+    async_io::AsyncWriteSink::new(put_sink(mdx, dst))
+}

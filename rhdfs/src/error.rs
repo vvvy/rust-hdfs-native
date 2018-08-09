@@ -37,7 +37,7 @@ macro_rules! app_error {
     {nn $e:expr} => { Error::Namenode(Cow::from($e)) };
     {dt $s:expr, $m:expr} => { Error::DataTransfer($s, $m.to_owned()) };
     {unreachable} => { Error::Other(Cow::from("got to an unreachable point in code")) };
-    {premature eof} => { Error::Other(Cow::from("premature end of input stream")) };
+    {premature eof} => { Error::Other(Cow::from(format!("premature end of input stream in {} {} {}", module_path!(), file!(), line!()))) };
     {other $e:expr} => { Error::Other(Cow::from($e)) };
     {other $($es:expr),+} => { Error::Other(Cow::from(format!($($es),+))) };
 }

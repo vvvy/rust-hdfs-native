@@ -4,7 +4,7 @@ mod packet;
 mod codec;
 #[macro_use]
 mod proto;
-//mod block_reader;
+mod read_streamer;
 //mod block_writer;
 mod checksum;
 
