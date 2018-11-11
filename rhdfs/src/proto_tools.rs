@@ -881,6 +881,7 @@ pub mod async_io {
     use std::io::{Read, Write, ErrorKind};
     use bytes::Bytes;
 
+    /// Converts a Stream into AsyncRead
     pub struct AsyncReadStream<S> {
         s: S,
         b: Bytes
@@ -925,30 +926,810 @@ pub mod async_io {
 
     impl<S> AsyncRead for AsyncReadStream<S> where S: Stream<Item=Bytes, Error=Error> { }
 
-
-    pub struct AsyncWriteSink<S> {
-        s: S,
-        b: Bytes
+    enum Flushing {
+        Now,
+        Later,
+        Never
     }
 
-    impl<S> AsyncWriteSink<S> {
-        pub fn new(s: S) -> AsyncWriteSink<S> { AsyncWriteSink { s, b: Bytes::new() } }
+    /// Converts a Sink into AsyncWrite
+    pub struct AsyncWriteSink<S> {
+        auto_flush: bool,
+        s: S,
+        pending: Option<Bytes>,
+        flushing: bool
+    }
+
+    impl<S> AsyncWriteSink<S> where S: Sink<SinkItem=Bytes, SinkError=Error> {
+        pub fn new(s: S, auto_flush: bool) -> AsyncWriteSink<S> {
+            AsyncWriteSink {
+                auto_flush,
+                s,
+                pending: None,
+                flushing: false
+            }
+        }
+
+        /// returns idle indicator wrapped into Result
+        fn turn(&mut self) -> Result<()> {
+            if self.flushing {
+                match self.s.poll_complete()? {
+                    Async::Ready(()) => {
+                        self.flushing = false;
+                        self.turn()
+                    }
+                    Async::NotReady =>
+                        Ok(())
+                }
+            } else if let Some(bytes) = self.pending.take() {
+                match self.s.start_send(bytes)? {
+                    AsyncSink::Ready => if self.auto_flush {
+                        self.flushing = true;
+                        self.turn()
+                    } else {
+                        Ok(())
+                    }
+                    AsyncSink::NotReady(bytes) => {
+                        self.pending = Some(bytes);
+                        self.flushing = true;
+                        self.turn()
+                    }
+                }
+            } else {
+                Ok(())
+            }
+        }
     }
 
     impl<S> Write for AsyncWriteSink<S> where S: Sink<SinkItem=Bytes, SinkError=Error> {
         fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-            unimplemented!()
+            self.turn()?;
+            if self.pending.is_none() {
+                self.pending = Some(Bytes::from(buf));
+                self.turn()?;
+                Ok(buf.len())
+            } else {
+                Err(ErrorKind::WouldBlock.into())
+            }
+
         }
 
         fn flush(&mut self) -> IoResult<()> {
-            unimplemented!()
+            self.turn()?;
+            if self.pending.is_some() {
+                Err(ErrorKind::WouldBlock.into())
+            } else {
+                if self.flushing {
+                    self.turn()?;
+                }
+                if self.flushing {
+                    Err(ErrorKind::WouldBlock.into())
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
     impl<S> AsyncWrite for AsyncWriteSink<S> where S: Sink<SinkItem=Bytes, SinkError=Error> {
         fn shutdown(&mut self) -> IoResult<Async<()>> {
-            unimplemented!()
+            Ok(self.s.close()?)
+        }
+    }
+
+
+    #[test]
+    fn test_async_write_sink() {
+        #[derive(Debug)]
+        enum TD {
+            StartSend(&'static [u8], bool),
+            PollComplete(bool),
+            Close(bool)
+        }
+
+        struct TestSink {
+            c: Vec<TD>
+        }
+
+        impl TestSink {
+            fn new(mut c: Vec<TD>) -> TestSink {
+                c.reverse();
+                TestSink { c }
+            }
+
+            fn finalize(&self) {
+                if !self.c.is_empty() {
+                    panic!("Entries not consumed: {:?}", self.c)
+                }
+            }
+        }
+
+        impl Sink for TestSink {
+            type SinkItem = Bytes;
+            type SinkError = Error;
+
+            fn start_send(&mut self, item: Bytes) -> Result<AsyncSink<Bytes>> {
+                let x = self.c.pop();
+                if let Some(TD::StartSend(bs, r)) = x {
+                    assert_eq!(bs, item);
+                    if r { Ok(AsyncSink::Ready) } else { Ok(AsyncSink::NotReady(item)) }
+                } else {
+                    panic!("got {:?} while expecting StartSend", x)
+                }
+            }
+
+            fn poll_complete(&mut self) -> Result<Async<()>> {
+                let x = self.c.pop();
+                if let Some(TD::PollComplete(r)) = x {
+                    if r { Ok(Async::Ready(())) } else { Ok(Async::NotReady) }
+                } else {
+                    panic!("got {:?} while expecting PollComplete", x)
+                }
+            }
+
+            fn close(&mut self) -> Result<Async<()>> {
+                let x = self.c.pop();
+                if let Some(TD::Close(r)) = x {
+                    if r { Ok(Async::Ready(())) } else { Ok(Async::NotReady) }
+                } else {
+                    panic!("got {:?} while expecting Close", x)
+                }
+            }
+        }
+
+        //----------------------------------------------------------------------------------
+        // no framing
+        //----------------------------------------------------------------------------------
+        let mut w = AsyncWriteSink::new(TestSink::new(vec![
+            TD::StartSend(&[0, 1, 2], true),
+            //poll_complete() is redundant here - close() is enough, see close() docs
+            TD::Close(true)
+        ]), false);
+        assert_eq!(w.write(&[0, 1, 2]).unwrap(), 3);
+        assert_eq!(w.shutdown().unwrap(), Async::Ready(()));
+        w.s.finalize();
+
+        let mut w = AsyncWriteSink::new(TestSink::new(vec![
+            TD::StartSend(&[0, 1, 2], true),
+            TD::StartSend(&[3, 4, 5 ,6], true),
+            TD::Close(true)
+        ]), false);
+        assert_eq!(w.write(&[0, 1, 2]).unwrap(), 3);
+        assert_eq!(w.write(&[3, 4, 5, 6]).unwrap(), 4);
+        assert_eq!(w.shutdown().unwrap(), Async::Ready(()));
+        w.s.finalize();
+
+        let mut w = AsyncWriteSink::new(TestSink::new(vec![
+            TD::StartSend(&[0, 1, 2], true),
+            TD::StartSend(&[3, 4, 5 ,6], false),
+            TD::PollComplete(true),
+            TD::StartSend(&[3, 4, 5 ,6], true),
+            TD::Close(true)
+        ]), false);
+        assert_eq!(w.write(&[0, 1, 2]).unwrap(), 3);
+        assert_eq!(w.write(&[3, 4, 5, 6]).unwrap(), 4);
+        assert_eq!(w.shutdown().unwrap(), Async::Ready(()));
+        w.s.finalize();
+
+        let mut w = AsyncWriteSink::new(TestSink::new(vec![
+            TD::StartSend(&[0, 1, 2], true),
+            TD::StartSend(&[3, 4, 5], false),
+            TD::PollComplete(false),
+            TD::PollComplete(false),
+            TD::PollComplete(true),
+            TD::StartSend(&[3, 4, 5], true),
+            TD::StartSend(&[6, 7, 8], true),
+            TD::Close(true)
+        ]), false);
+        assert_eq!(w.write(&[0, 1, 2]).unwrap(), 3);
+        assert_eq!(w.write(&[3, 4, 5]).unwrap(), 3);
+        assert_eq!(w.write(&[6, 7, 8]).expect_err("EWouldBlock expected!!!").kind(), ErrorKind::WouldBlock);
+        assert_eq!(w.write(&[6, 7, 8]).unwrap(), 3);
+        assert_eq!(w.shutdown().unwrap(), Async::Ready(()));
+        w.s.finalize();
+
+        let mut w = AsyncWriteSink::new(TestSink::new(vec![
+            TD::StartSend(&[0, 1, 2], true),
+            TD::Close(false),
+            TD::Close(true)
+        ]), false);
+        assert_eq!(w.write(&[0, 1, 2]).unwrap(), 3);
+        assert_eq!(w.shutdown().unwrap(), Async::NotReady);
+        assert_eq!(w.shutdown().unwrap(), Async::Ready(()));
+        w.s.finalize();
+
+    }
+}
+
+//======================================================================================================================
+// New API
+//======================================================================================================================
+
+pub use futures::Async;
+
+enum ChannelState<Connection> {
+    Idle,
+    Connecting(BFI<Connection>),
+    Connected(Connection),
+}
+
+#[derive(Debug)]
+pub enum CQ<Q, ConnectionData> {
+    SetConnection(ConnectionData),
+    ClearConnection,
+    Send(Q)
+}
+
+
+/// Wraps a Sink into a structure that supports in-band connection management via special messages.
+/// `SetConnection(cdata)` establishes connection, `ClearConnection` terminates it.
+pub struct Channel<Q, R, Connection, ConnectionData> {
+    s: ChannelState<Connection>,
+    _q_t: PhantomData<Q>,
+    _r_t: PhantomData<R>,
+    _connection_data_t: PhantomData<ConnectionData>
+}
+
+impl<Q, R, Connection, ConnectionData> Channel<Q, R, Connection, ConnectionData> {
+    pub fn new() -> Channel<Q, R, Connection, ConnectionData> {
+        Channel {
+            s: ChannelState::Idle,
+            _q_t: PhantomData,
+            _r_t: PhantomData,
+            _connection_data_t: PhantomData
         }
     }
 }
 
+
+
+impl<Q, R, Connection, ConnectionData> Sink for Channel<Q, R, Connection, ConnectionData> where
+    Connection: Sink<SinkItem=Q, SinkError=Error>,
+    ConnectionData: Into<BFI<Connection>>
+{
+    type SinkItem = CQ<Q, ConnectionData>;
+    type SinkError = Error;
+
+    fn start_send(&mut self, q: CQ<Q, ConnectionData>) -> Result<AsyncSink<CQ<Q, ConnectionData>>> {
+        fn start_connecting<Q, Connection, ConnectionData>(cdata: ConnectionData) -> SnV<ChannelState<Connection>, Result<AsyncSink<CQ<Q, ConnectionData>>>>
+            where ConnectionData: Into<BFI<Connection>>
+        {
+            let mut f = cdata.into();
+            match f.poll() {
+                Ok(Async::Ready(c)) =>
+                    SnV::SV(ChannelState::Connected(c), Ok(AsyncSink::Ready)),
+                Ok(Async::NotReady) =>
+                    SnV::SV(ChannelState::Connecting(f), Ok(AsyncSink::Ready)),
+                Err(e) =>
+                    SnV::V(Err(e.into()))
+            }
+        }
+
+        match q {
+            CQ::SetConnection(cdata) => switch_state(
+                &mut self.s,
+                |s| match s {
+                    ChannelState::Connected(c) =>
+                        match c.close() {
+                            Ok(Async::NotReady) =>
+                                SnV::V(Ok(AsyncSink::NotReady(CQ::SetConnection(cdata)))),
+                            Ok(Async::Ready(())) =>
+                                start_connecting(cdata),
+                            Err(e) =>
+                                SnV::V(Err(e))
+                        }
+                    _ =>
+                        start_connecting(cdata)
+                }
+            ),
+            CQ::ClearConnection => switch_state(
+                &mut self.s,
+                |s| match s {
+                    ChannelState::Connected(c) =>
+                        match c.close() {
+                            Ok(Async::NotReady) =>
+                                SnV::V(Ok(AsyncSink::NotReady(CQ::ClearConnection))),
+                            Ok(Async::Ready(())) =>
+                                SnV::SV(ChannelState::Idle, Ok(AsyncSink::Ready)),
+                            Err(e) =>
+                                SnV::V(Err(e))
+                        }
+                    _ =>
+                        SnV::SV(ChannelState::Idle, Ok(AsyncSink::Ready))
+                }
+            ),
+            CQ::Send(q) => switch_state(
+                &mut self.s,
+                |s| match s {
+                    ChannelState::Connected(c) =>
+                        match c.start_send(q) {
+                            Ok(AsyncSink::NotReady(q)) =>
+                                SnV::V(Ok(AsyncSink::NotReady(CQ::Send(q)))),
+                            Ok(AsyncSink::Ready) =>
+                                SnV::V(Ok(AsyncSink::Ready)),
+                            Err(e) =>
+                                SnV::V(Err(e))
+                        }
+                    ChannelState::Connecting(f) =>
+                        match f.poll() {
+                            Ok(Async::Ready(mut c)) =>
+                                match c.start_send(q) {
+                                    Ok(AsyncSink::NotReady(q)) =>
+                                        SnV::SV(ChannelState::Connected(c), Ok(AsyncSink::NotReady(CQ::Send(q)))),
+                                    Ok(AsyncSink::Ready) =>
+                                        SnV::SV(ChannelState::Connected(c), Ok(AsyncSink::Ready)),
+                                    Err(e) =>
+                                        SnV::SV(ChannelState::Connected(c), Err(e))
+                                }
+                            Ok(Async::NotReady) =>
+                                SnV::V(Ok(AsyncSink::NotReady(CQ::Send(q)))),
+                            Err(e) =>
+                                SnV::V(Err(e.into()))
+                        }
+                    ChannelState::Idle =>
+                        SnV::V(Err(app_error!(other "Channel: Invalid state (Send without SetConnection)")))
+                }
+            )
+        }
+    }
+
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        switch_state(
+            &mut self.s,
+            |s| match s {
+                ChannelState::Idle =>
+                    SnV::V(Ok(Async::Ready(()))),
+                ChannelState::Connecting(f) =>
+                    match f.poll() {
+                        Ok(Async::Ready(c)) =>
+                            SnV::SV(ChannelState::Connected(c), Ok(Async::Ready(()))),
+                        Ok(Async::NotReady) =>
+                            SnV::V(Ok(Async::NotReady)),
+                        Err(e) =>
+                            SnV::V(Err(e.into()))
+                    }
+                ChannelState::Connected(c) =>
+                    SnV::V(c.poll_complete())
+            }
+        )
+    }
+
+    fn close(&mut self) -> Result<Async<()>> {
+        match &mut self.s {
+            ChannelState::Connected(c) =>
+                c.close(),
+            s@ ChannelState::Connecting(..) => {
+                *s = ChannelState::Idle;
+                Ok(Async::Ready(()))
+            }
+            ChannelState::Idle =>
+                Ok(Async::Ready(()))
+        }
+    }
+}
+
+fn poll_channel<R, Connection>(s: &mut ChannelState<Connection>) -> Result<Async<Option<R>>> where
+    Connection: Stream<Item=R, Error=Error>
+{
+    switch_state(
+        s,
+        |s| match s {
+            ChannelState::Idle =>
+                SnV::V(Err(app_error!(other "Channel: Invalid state (Recv without SetConnection)"))),
+            ChannelState::Connecting(f) =>
+                match f.poll() {
+                    Ok(Async::Ready(mut c)) => {
+                        let rv = c.poll();
+                        SnV::SV(ChannelState::Connected(c), rv)
+                    }
+                    Ok(Async::NotReady) =>
+                        SnV::V(Ok(Async::NotReady)),
+                    Err(e) =>
+                        SnV::V(Err(e.into()))
+                }
+            ChannelState::Connected(c) =>
+                SnV::V(c.poll())
+        }
+    )
+}
+
+impl<Q, R, Connection, ConnectionData> Stream for Channel<Q, R, Connection, ConnectionData> where
+    Connection: Stream<Item=R, Error=Error>
+{
+    type Item = R;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<R>>> {
+        poll_channel(&mut self.s)
+    }
+}
+
+pub enum HCQ<ConnectionData> {
+    SetConnection(ConnectionData),
+    ClearConnection
+}
+
+/// Stream-only (half duplex) version of `Channel`
+pub struct HChannel<R, Connection, ConnectionData> {
+    s: ChannelState<Connection>,
+    _r_t: PhantomData<R>,
+    _connection_data_t: PhantomData<ConnectionData>
+}
+
+impl<R, Connection, ConnectionData> HChannel<R, Connection, ConnectionData> {
+    pub fn new() -> HChannel<R, Connection, ConnectionData> {
+        HChannel { s: ChannelState::Idle, _r_t: PhantomData, _connection_data_t: PhantomData }
+    }
+}
+
+impl<R, Connection, ConnectionData> HChannel<R, Connection, ConnectionData> where
+    ConnectionData: Into<BFI<Connection>> {
+    pub fn connect(cdata: ConnectionData) -> HChannel<R, Connection, ConnectionData> {
+        HChannel { s: ChannelState::Connecting(cdata.into()), _r_t: PhantomData, _connection_data_t: PhantomData }
+    }
+}
+
+impl<R, Connection, ConnectionData> Sink for HChannel<R, Connection, ConnectionData> where
+    ConnectionData: Into<BFI<Connection>>
+{
+    type SinkItem = HCQ<ConnectionData>;
+    type SinkError = Error;
+
+    fn start_send(&mut self, q: HCQ<ConnectionData>) -> Result<AsyncSink<HCQ<ConnectionData>>> {
+        fn start_connecting<Connection, ConnectionData>(cdata: ConnectionData) -> SnV<ChannelState<Connection>, Result<AsyncSink<HCQ<ConnectionData>>>>
+            where ConnectionData: Into<BFI<Connection>>
+        {
+            let mut f = cdata.into();
+            match f.poll() {
+                Ok(Async::Ready(c)) =>
+                    SnV::SV(ChannelState::Connected(c), Ok(AsyncSink::Ready)),
+                Ok(Async::NotReady) =>
+                    SnV::SV(ChannelState::Connecting(f), Ok(AsyncSink::Ready)),
+                Err(e) =>
+                    SnV::V(Err(e.into()))
+            }
+        }
+
+        match q {
+            HCQ::SetConnection(cdata) => switch_state(
+                &mut self.s,
+                |_| start_connecting(cdata)
+            ),
+            HCQ::ClearConnection => switch_state(
+                &mut self.s,
+                |s| SnV::SV(ChannelState::Idle, Ok(AsyncSink::Ready))
+            )
+        }
+    }
+
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        switch_state(
+            &mut self.s,
+            |s| match s {
+                ChannelState::Idle =>
+                    SnV::V(Ok(Async::Ready(()))),
+                ChannelState::Connecting(f) =>
+                    match f.poll() {
+                        Ok(Async::Ready(c)) =>
+                            SnV::SV(ChannelState::Connected(c), Ok(Async::Ready(()))),
+                        Ok(Async::NotReady) =>
+                            SnV::V(Ok(Async::NotReady)),
+                        Err(e) =>
+                            SnV::V(Err(e.into()))
+                    }
+                ChannelState::Connected(c) =>
+                    SnV::V(Ok(Async::Ready(())))
+            }
+        )
+    }
+
+    fn close(&mut self) -> Result<Async<()>> {
+        self.s = ChannelState::Idle;
+        Ok(Async::Ready(()))
+    }
+}
+
+impl<R, Connection, ConnectionData> Stream for HChannel<R, Connection, ConnectionData> where
+    Connection: Stream<Item=R, Error=Error>
+{
+    type Item = R;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<R>>> {
+        poll_channel(&mut self.s)
+    }
+}
+
+
+use std::time::Instant;
+pub use std::time::Duration;
+
+/// Channel with automatic connection management and connection idle timeout.
+/// Idle timer is restarted on each successful poll_complete preceded by a successful start_send,
+/// and checked upon entry in start_send (where the connection is restarted if expired),
+/// poll_complete and poll (two latter fail if expired). The idle timer is also restarted upon
+/// starting connection.
+pub struct AutoChannel<Q, R, Connection, ConnectionData> {
+    c: Channel<Q, R, Connection, ConnectionData>,
+    timeout_point: Instant,
+    send_started: bool,
+    timeout: Duration,
+    cdata: ConnectionData
+}
+
+impl<Q, R, Connection, ConnectionData> AutoChannel<Q, R, Connection, ConnectionData> where
+    Connection: Sink<SinkItem=Q, SinkError=Error>,
+    ConnectionData: Into<BFI<Connection>> + Clone
+{
+    pub fn new(cdata: ConnectionData, timeout: Duration) -> AutoChannel<Q, R, Connection, ConnectionData> {
+        AutoChannel {
+            c: Channel::new(),
+            timeout_point: Instant::now() - timeout,    //a point in the past
+            send_started: false,
+            timeout,
+            cdata
+        }
+    }
+
+    /// returns true if ok to start sending, false if the channel is busy
+    /// (e.g. tearing down previous connection)
+    fn check_connection(&mut self, fail_on_timeout: bool) -> Result<bool> {
+        let now = Instant::now();
+        if now >= self.timeout_point {
+            if fail_on_timeout {
+                Err(app_error!(other "AutoChannel: connection idle timeout"))
+            } else {
+                match self.c.start_send(CQ::SetConnection(self.cdata.clone()))? {
+                    AsyncSink::Ready => {
+                        self.connection_activity();
+                        self.send_started = false;
+                        Ok(true)
+                    },
+                    AsyncSink::NotReady(_) =>
+                        Ok(false)
+                }
+            }
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Schedules idle timer from now
+    fn connection_activity(&mut self) {
+        self.timeout_point = Instant::now() + self.timeout;
+    }
+}
+
+impl<Q, R, Connection, ConnectionData> Sink for AutoChannel<Q, R, Connection, ConnectionData> where
+    Connection: Sink<SinkItem=Q, SinkError=Error>,
+    ConnectionData: Into<BFI<Connection>> + Clone + Debug,
+    Q: Debug
+{
+    type SinkItem = Q;
+    type SinkError = Error;
+
+    fn start_send(&mut self, item: Q) -> Result<AsyncSink<Q>> {
+        if self.check_connection(false)? {
+            match self.c.start_send(CQ::Send(item))? {
+                AsyncSink::NotReady(CQ::Send(q)) =>
+                    Ok(AsyncSink::NotReady(q)),
+                AsyncSink::Ready => {
+                    self.send_started = true;
+                    Ok(AsyncSink::Ready)
+                }
+                other =>
+                    Err(app_error!(other "AutoChannel: Unexpected return value from start_send: {:?}", other))
+            }
+        } else {
+            Ok(AsyncSink::NotReady(item))
+        }
+    }
+
+    fn poll_complete(&mut self) -> Result<Async<()>> {
+        let _ = self.check_connection(true)?;
+        let rv = self.c.poll_complete()?;
+        if self.send_started && rv.is_ready() {
+            self.send_started = false;
+            self.connection_activity()
+        }
+        Ok(rv)
+    }
+
+    fn close(&mut self) -> Result<Async<()>> {
+        if self.send_started {
+            let _ = self.check_connection(true)?;
+            self.send_started = false;
+        }
+        self.c.close()
+    }
+}
+
+impl<Q, R, Connection, ConnectionData> Stream for AutoChannel<Q, R, Connection, ConnectionData> where
+    Connection: Stream<Item=R, Error=Error> + Sink<SinkItem=Q, SinkError=Error>,
+    ConnectionData: Into<BFI<Connection>> + Clone
+{
+    type Item = R;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<R>>> {
+        let _ = self.check_connection(true)?;
+        self.c.poll()
+    }
+}
+
+
+
+//----------------------------------------------------------------------------------------------------------------------
+#[derive(Debug)]
+enum AtomicSendReq<LQ> {
+    Enqueue(LQ),
+    Flush,
+    NOP
+}
+
+#[derive(Debug)]
+pub enum SendReq<LQ> {
+    EnqueueAndFlush(LQ),
+    Enqueue(LQ),
+    Flush,
+    NOP
+}
+
+/// Non-trivial state values for `SendState`
+#[derive(Debug)]
+enum SendStateE<LQ> {
+    FSF(LQ),
+    FS(LQ),
+    SF(LQ),
+    S(LQ),
+    F
+}
+
+/// Sending state. A queue-like object. pop (take) and pull(untake) are at front, populate is push at back
+#[derive(Debug)]
+struct SendState<LQ> {
+    s: Option<SendStateE<LQ>>
+}
+
+impl<LQ: Debug> SendState<LQ> {
+    fn new() -> SendState<LQ> { SendState { s: None } }
+    fn is_empty(&self) -> bool { self.s.is_none() }
+    fn state_id(&self) -> Option<std::mem::Discriminant<SendStateE<LQ>>> {
+        self.s.as_ref().map(|e| std::mem::discriminant(e))
+    }
+    fn take(&mut self) -> AtomicSendReq<LQ> {
+        use self::SendStateE as S;
+        use self::AtomicSendReq as A;
+        switch_state(&mut self.s, |s| match s.take() {
+            Some(S::FSF(q)) => SnV::SV(Some(S::SF(q)), A::Flush),
+            Some(S::FS(q)) => SnV::SV(Some(S::S(q)), A::Flush),
+            Some(S::SF(q)) => SnV::SV(Some(S::F), A::Enqueue(q)),
+            Some(S::S(q)) => SnV::SV(None, A::Enqueue(q)),
+            Some(S::F) => SnV::SV(None, A::Flush),
+            None => SnV::SV(None, A::NOP)
+        })
+    }
+    fn untake(&mut self, r: AtomicSendReq<LQ>) -> Result<()> {
+        use self::SendStateE as S;
+        use self::AtomicSendReq as A;
+        switch_state(&mut self.s, move |s| match (s.take(), r) {
+            (Some(S::SF(q)), A::Flush) =>  SnV::SV(Some(S::FSF(q)), Ok(())),
+            (Some(S::S(q)), A::Flush) => SnV::SV(Some(S::FS(q)), Ok(())),
+            (Some(S::F), A::Enqueue(q)) => SnV::SV(Some(S::SF(q)), Ok(())),
+            (None, A::Enqueue(q))  => SnV::SV(Some(S::S(q)), Ok(())),
+            (None, A::Flush) => SnV::SV(Some(S::F), Ok(())),
+            (None, A::NOP)  => SnV::SV(None, Ok(())),
+            (s, a) => SnV::SV(None, Err(app_error!(other "SendState: untake: Invalid s/a {:?}/{:?}", s, a)))
+        })
+    }
+    fn populate(&mut self, p: SendReq<LQ>) -> Result<()> {
+        use self::SendStateE as S;
+        use self::SendReq as A;
+        switch_state(&mut self.s, move |s| match (s.take(), p) {
+            (Some(S::S(q)), A::Flush) => SnV::SV(Some(S::SF(q)), Ok(())),
+            (Some(S::F), A::Enqueue(q)) => SnV::SV(Some(S::FS(q)), Ok(())),
+            (Some(S::F), A::EnqueueAndFlush(q)) => SnV::SV(Some(S::FSF(q)), Ok(())),
+            (None, A::Enqueue(q))  => SnV::SV(Some(S::S(q)), Ok(())),
+            (None, A::EnqueueAndFlush(q))  => SnV::SV(Some(S::SF(q)), Ok(())),
+            (None, A::Flush) => SnV::SV(Some(S::F), Ok(())),
+            (None, A::NOP)  => SnV::SV(None, Ok(())),
+            (s, a) => SnV::SV(None, Err(app_error!(other "SendState: populate: Invalid s/a {:?}/{:?}", s, a)))
+        })
+    }
+}
+
+
+/// Behaviour trait for `StreamProtocol`
+pub trait StreamProtocolFsm {
+    /// Upper-layer `Stream` item type
+    type R: Debug;
+    /// Lower-layer `Sink` item type
+    type LQ: Debug;
+    /// Lower-layer `Stream` item type
+    type LR: Debug;
+    /// Obtain next item to send along with flush flag
+    fn get_downstream(&mut self) -> Result<SendReq<Self::LQ>>;
+    /// handle a message from the lower layer
+    fn handle_upstream(&mut self, lr: Option<Self::LR>) -> Result<Async<Option<Self::R>>>;
+}
+
+/// Protoclol layer adapter that converts lower-layer `Sink`+`Stream` into upper-layer `Stream`.
+pub struct StreamProtocol<L, FSM> where FSM: StreamProtocolFsm {
+    s: SendState<FSM::LQ>,
+    l: L,
+    fsm: FSM
+}
+
+impl <L, FSM> StreamProtocol<L, FSM> where
+    FSM: StreamProtocolFsm {
+    pub fn new(l: L, fsm: FSM) -> StreamProtocol<L, FSM> {
+        StreamProtocol {
+            s: SendState::new(),
+            l,
+            fsm
+        }
+    }
+    pub fn into_parts(self) -> (L, FSM) {
+        (self.l, self.fsm)
+    }
+}
+
+impl <L, FSM> StreamProtocol<L, FSM> where
+    L: Sink<SinkItem=FSM::LQ, SinkError=Error> + Stream<Item=FSM::LR, Error=Error>,
+    FSM: StreamProtocolFsm {
+
+    fn push_out(&mut self) -> Result<()> {
+        use self::AtomicSendReq as A;
+        loop {
+            if self.s.is_empty() {
+                self.s.populate(self.fsm.get_downstream()?)?;
+                trace!("get_downstream => {:?}", self.s)
+            }
+            match self.s.take() {
+                A::Enqueue(lq) =>
+                    if let AsyncSink::NotReady(lq) = self.l.start_send(lq)? {
+                        self.s.untake(A::Enqueue(lq))?;
+                        self.s.untake(A::Flush)?
+                    }
+                A::Flush =>
+                    if let Async::NotReady = self.l.poll_complete()? {
+                        self.s.untake(A::Flush)?;
+                        //stuck in flushing, so give up this time
+                        break Ok(())
+                    }
+                A::NOP =>
+                    //nothing to send out this time
+                    break Ok(())
+            }
+        }
+    }
+}
+
+impl<L, FSM> Stream for StreamProtocol<L, FSM> where
+    L: Sink<SinkItem=FSM::LQ, SinkError=Error> + Stream<Item=FSM::LR, Error=Error>,
+    FSM: StreamProtocolFsm
+{
+    type Item = FSM::R;
+    type Error = Error;
+
+    fn poll(&mut self) -> Result<Async<Option<FSM::R>>> {
+        self.push_out()?;
+        loop {
+
+            match self.l.poll()? {
+                Async::Ready(m) => {
+                    trace!("handle_upstream <= {:?}", m);
+                    let w = self.fsm.handle_upstream(m);
+                    trace!("handle_upstream => {:?}", w);
+                    let w = w?;
+                    self.push_out()?;
+                    if let Async::Ready(w) = w {
+                        break Ok(Async::Ready(w))
+                    }
+                }
+                Async::NotReady =>
+                    break Ok(Async::NotReady)
+            }
+        }
+    }
+}

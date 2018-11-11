@@ -1,3 +1,104 @@
+use *;
+use bytes::*;
+use super::{
+    packet::BlockDataPacket,
+    checksum::{ChecksumValidator}
+};
+
+#[derive(Debug)]
+pub struct WriteFramer {
+    checksum: Box<ChecksumValidator>,
+    max_offset: usize,
+    packet_len: usize,
+    seqno: i64,
+    offset: usize
+}
+
+impl WriteFramer {
+    pub fn new(checksum: Box<ChecksumValidator>, block_len: usize, packet_len: usize) -> WriteFramer {
+        WriteFramer {
+            checksum,
+            max_offset: block_len,
+            packet_len,
+            seqno: 0,
+            offset: 0,
+        }
+    }
+
+    pub fn process_packet(&mut self, data: Bytes) -> Result<BlockDataPacket> {
+        fn checked_conv64(a: usize) -> Result<i64> {
+            if a > std::i64::MAX as usize {
+                Err(app_error!(other "usize -> i64 conversion overflow"))
+            } else {
+                Ok(a as i64)
+            }
+        }
+        fn checked_conv32(a: usize) -> Result<i32> {
+            if a > std::i32::MAX as usize {
+                Err(app_error!(other "usize -> i32 conversion overflow"))
+            } else {
+                Ok(a as i32)
+            }
+        }
+
+        let dlen = data.len();
+
+        if dlen != self.packet_len && self.offset + dlen != self.max_offset {
+            Err(app_error!(other "Short packet not at the end of file"))
+        } else if self.offset + dlen > self.max_offset {
+            Err(app_error!(other "Excess packet"))
+        } else {
+            let checksum = Bytes::from(self.checksum.eval(&data));
+            let header = pb_cons!(PacketHeaderProto,
+                offset_in_block: checked_conv64(self.offset)?,
+                seqno: self.seqno,
+                last_packet_in_block: false,
+                data_len: checked_conv32(dlen)?
+            );
+            self.seqno = self.seqno.checked_add(1).ok_or_else(|| app_error!(other "WriteStreamer: Sequence number overflow"))?;
+            self.offset = self.offset.checked_add(dlen).ok_or_else(|| app_error!(other "WriteStreamer: offset overflow"))?;
+            Ok(BlockDataPacket { header, checksum, data })
+        }
+    }
+
+}
+
+#[derive(Debug)]
+pub struct WriteStreamer {
+    f: WriteFramer
+}
+
+impl WriteStreamer {
+    pub fn new(checksum: Box<ChecksumValidator>, block_len: usize, packet_len: usize) -> WriteStreamer {
+        WriteStreamer { f: WriteFramer::new(checksum, block_len, packet_len) }
+    }
+
+    /*
+    pub fn push(&mut self, data: Bytes) -> Result<()> {
+        unimplemented!()
+    }
+
+    pub fn pull(&mut self) -> Option<BlockDataPacket> {
+        unimplemented!()
+    }
+
+    pub fn ack(&mut self, ack: PipelineAckProto) -> Result<()> {
+        unimplemented!()
+    }
+*/
+    pub fn push_paused(&self) -> bool {
+        unimplemented!()
+    }
+/*
+    /// Returns `Ok(false)` to keep running, `Ok(true)` on success, `Err(e)` otherwise
+    pub fn process_ack(ack: PipelineAckProto) -> Result<bool> {
+        //analyze seqno (must be acked seqno + 1)
+        //analyse statuses (remove failed nodes and resume pipeline)
+        unimplemented!()
+    }*/
+}
+
+
 /*
 use std::io::Read;
 use std::fmt;

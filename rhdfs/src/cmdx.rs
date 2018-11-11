@@ -55,16 +55,16 @@ impl NatConnector {
     }
 }
 
-impl Connector<nn::Connection, SocketAddr> for NatConnector {
-    fn connect(&mut self, a: &SocketAddr) -> BFI<nn::Connection> {
+impl Connector<nn::Connection_, SocketAddr> for NatConnector {
+    fn connect(&mut self, a: &SocketAddr) -> BFI<nn::Connection_> {
         match &self.session_data.forced_client_id {
             None =>
-                nn::Connection::connect(
+                nn::Connection_::connect(
                     self.translate(a),
                     self.session_data.effective_user.clone()
                 ),
             Some(cn) =>
-                nn::Connection::connect_det(
+                nn::Connection_::connect_det(
                     self.translate(a),
                     cn.clone(),
                     self.session_data.effective_user.clone()
@@ -74,10 +74,10 @@ impl Connector<nn::Connection, SocketAddr> for NatConnector {
     }
 }
 
-impl Connector<dt::Connection, SocketAddr> for NatConnector {
-    fn connect(&mut self, a: &SocketAddr) -> BFI<dt::Connection> {
+impl Connector<dt::Connection_, SocketAddr> for NatConnector {
+    fn connect(&mut self, a: &SocketAddr) -> BFI<dt::Connection_> {
         let cname = self.next_client_name();
-        Box::new(dt::Connection::connect(
+        Box::new(dt::Connection_::connect(
             self.translate(a),
             cname,
         ))
@@ -188,8 +188,8 @@ impl<C, Q, R, A> CM<C, Q, A> where
     }
 }
 
-type NnCm = CM<nn::Connection, NnaQ, SocketAddr>;
-type DtCm = CM<dt::Connection, DtaQ, SocketAddr>;
+type NnCm = CM<nn::Connection_, NnaQ, SocketAddr>;
+type DtCm = CM<dt::Connection_, DtaQ, SocketAddr>;
 type Channel = usize;
 
 #[derive(Debug)]

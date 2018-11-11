@@ -302,7 +302,7 @@ macro_rules! trace_ar {
 #[cfg(test)]
 #[macro_use]
 pub mod test {
-    use std::fmt::{Display, Formatter, Result};
+    use std::fmt::{Display, Debug, Formatter, Result};
 
     macro_rules! init_env_logger {
         () => { {
@@ -371,6 +371,11 @@ pub mod test {
                 write!(f, "{:02x} ", byte)?;
             }
             Ok(())
+        }
+    }
+    impl<'a> Debug for HexSlice<'a> {
+        fn fmt(&self, f: &mut Formatter) -> Result {
+            <Self as Display>::fmt(self, f)
         }
     }
 

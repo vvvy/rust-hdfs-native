@@ -8,7 +8,7 @@ use super::{
 pub type ReadRange = (i64, i64);
 
 #[derive(Debug)]
-pub struct ReadStreamer {
+pub(crate) struct ReadStreamer {
     checksum: Box<ChecksumValidator>,
     read_range: ReadRange,
     seqno: i64,
@@ -58,7 +58,7 @@ impl ReadStreamer {
         let _ = self.check_sequencing(seqno, offset)?;
         let _ = self.validate_checksums(&p.data, &p.checksum)?;
         self.adjust_sequencing(p.data.len());
-        Ok(crop_bytes(p.data.freeze(), offset, self.read_range))
+        Ok(crop_bytes(p.data, offset, self.read_range))
     }
 
     pub fn get_success_status(&self) -> DtStatus {

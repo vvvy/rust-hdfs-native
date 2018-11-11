@@ -419,8 +419,10 @@ impl<H, TI> Encoder for PduEncoder<H, TI> where
     type Error = Error;
 
     fn encode(&mut self, mut item: Self::Item, dst: &mut BytesMut) -> Result<()> {
-        let hi = (self.f)(item.serialized_len())?;
+        let item_len = item.serialized_len();
+        let hi = (self.f)(item_len)?;
         let _ = self.h.encode(hi, dst)?;
+        dst.reserve(item_len);
         item.encode(dst)
     }
 }

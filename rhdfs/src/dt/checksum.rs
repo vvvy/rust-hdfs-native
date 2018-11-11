@@ -8,7 +8,7 @@ use protobuf_api::*;
 pub trait ChecksumValidator: Send + Debug {
     fn is_trivial(&self) -> bool;
     fn is_checksum_ok(&self, data: &[u8], sums: &[u8]) -> bool;
-    //fn eval(&self, data: &[u8], sums: &mut [u8]);
+    fn eval(&self, data: &[u8]) -> Vec<u8>;
 }
 
 #[derive(Debug)]
@@ -19,7 +19,7 @@ impl ChecksumValidator for CVTrivial {
     fn is_checksum_ok(&self, _data: &[u8], _sums: &[u8]) -> bool {
         true
     }
-    //fn eval(&self, data: &[u8], sums: &mut [u8]) { }
+    fn eval(&self, _data: &[u8]) -> Vec<u8> { Vec::new() }
 }
 
 pub struct CVCRC32 {
@@ -45,10 +45,16 @@ impl ChecksumValidator for CVCRC32 {
             .find(|&(d, s)| (self.algo)(d) != BigEndian::read_u32(s))
             .is_none()
     }
-    /*fn eval(&self, data: &[u8], sums: &mut [u8]) {
+    fn eval(&self, data: &[u8]) -> Vec<u8> {
+        use bytes::BufMut;
         let idata = data.chunks(self.bytes_per_checksum);
-        let b = BytesMut::f
-    }*/
+        let checksum_count = (data.len() - 1) / self.bytes_per_checksum + 1;
+        let mut rv = Vec::with_capacity(4 * checksum_count);
+        for chunk in idata {
+            rv.put_u32::<BigEndian>((self.algo)(chunk))
+        }
+        rv
+    }
 }
 
 impl CVCRC32 {
@@ -60,14 +66,18 @@ impl CVCRC32 {
     }
 }
 
-pub fn new_checksum(csp: ChecksumProto) -> Box<ChecksumValidator> {
+pub fn checksum_from_proto(csp: ChecksumProto) -> Box<ChecksumValidator> {
     let (ctype, bpc) = pb_decons!(ChecksumProto, csp, type, bytes_per_checksum);
-    match if bpc == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
+    checksum_from_args(ctype, bpc as usize)
+}
+
+pub fn checksum_from_args(ctype: ChecksumTypeProto, bytes_per_checksum: usize) -> Box<ChecksumValidator> {
+    match if bytes_per_checksum == 0 { ChecksumTypeProto::CHECKSUM_NULL } else { ctype } {
         ChecksumTypeProto::CHECKSUM_NULL =>
             Box::new(CVTrivial),
         ChecksumTypeProto::CHECKSUM_CRC32 =>
-            Box::new(CVCRC32::new_crc32(bpc as usize)),
+            Box::new(CVCRC32::new_crc32(bytes_per_checksum)),
         ChecksumTypeProto::CHECKSUM_CRC32C =>
-            Box::new(CVCRC32::new_crc32c(bpc as usize))
+            Box::new(CVCRC32::new_crc32c(bytes_per_checksum))
     }
 }

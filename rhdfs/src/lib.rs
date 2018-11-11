@@ -25,6 +25,8 @@ mod dt;
 mod nn;
 mod cmdx;
 
+mod op;
+
 pub mod hdfs;
 pub mod config;
 

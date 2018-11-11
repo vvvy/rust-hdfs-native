@@ -17,7 +17,7 @@
 
 
 use tokio_io::codec::{Decoder, Encoder};
-use bytes::{BytesMut, BufMut};
+use bytes::{BytesMut, Bytes, BufMut};
 use byteorder::{ByteOrder, BigEndian};
 
 use protobuf_api::PacketHeaderProto;
@@ -26,11 +26,11 @@ use ::*;
 
 // TODO: redefine Debug so only initial bytes of BytesMut are printed, and printed in hex
 /// Data packet for block read|write. Note that `header.data_len == data.len()`
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct BlockDataPacket {
     pub header: PacketHeaderProto,
-    pub checksum: BytesMut,
-    pub data: BytesMut
+    pub checksum: Bytes,
+    pub data: Bytes
 }
 
 impl BlockDataPacket {
@@ -97,7 +97,7 @@ impl Decoder for PacketBodyDecoder {
             let checksum_len = self.payload_len - datalen as usize;
             let checksum = src.split_to(checksum_len);
             let data = src.split_to(datalen as usize);
-            Ok(Some(BlockDataPacket { header, checksum, data }))
+            Ok(Some(BlockDataPacket { header, checksum: checksum.freeze(), data: data.freeze() }))
         }
     }
 }
@@ -192,8 +192,8 @@ fn test_encoder() {
 
     let bdp = BlockDataPacket {
         header,
-        checksum: BytesMut::from(&checksum[..]),
-        data: BytesMut::from(&data[..])
+        checksum: Bytes::from(&checksum[..]),
+        data: Bytes::from(&data[..])
     };
 
     let mut e = PacketEncoder::new();

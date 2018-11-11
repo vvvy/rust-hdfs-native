@@ -83,11 +83,11 @@ pub fn get_listing(mdx: Mdx, source: String, need_location: bool) -> GetListingS
 
 
 #[test]
-fn test_get_listing() {
+fn test_get_listing_() {
     init_env_logger!();
 
     use util::test::ptk::*;
-    let host_port = "127.0.0.1:58019";
+    let host_port = "127.0.0.1:58119";
     let t = spawn_test_server(host_port, test_script! {
 
     expect "68:72:70:63:09:00:00:00:00:00:1e:10:08:02:10:00:18:05:22:08:01:02:03:04:04:03:02:01:\
@@ -488,11 +488,11 @@ impl ProtoFsmSink for Put {
     type NR = MdxR;
     type UQ = Bytes;
 
-    fn handle_n(&mut self, ne: NetEvent<<Self as ProtoFsmSink>::NR>) -> SinkAction<<Self as ProtoFsmSink>::NQ> {
+    fn handle_n(&mut self, ne: NetEvent<MdxR>) -> SinkAction<MdxQ> {
         unimplemented!()
     }
 
-    fn handle_u(&mut self, ue: UserEvent<<Self as ProtoFsmSink>::UQ>) -> SinkAction<<Self as ProtoFsmSink>::NQ> {
+    fn handle_u(&mut self, ue: UserEvent<Bytes>) -> SinkAction<MdxQ> {
         unimplemented!()
     }
 }
@@ -506,5 +506,5 @@ pub fn put_sink(mdx: Mdx, dst: String) -> PutSink {
 pub type PutAsyncWrite = async_io::AsyncWriteSink<PutSink>;
 
 pub fn put(mdx: Mdx, dst: String) -> PutAsyncWrite {
-    async_io::AsyncWriteSink::new(put_sink(mdx, dst))
+    async_io::AsyncWriteSink::new(put_sink(mdx, dst), false)
 }

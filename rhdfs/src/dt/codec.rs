@@ -46,159 +46,29 @@ fn encode_generic_op<PDU: PduSer>(op: Op, pdu: PDU, dst: &mut BytesMut) -> Resul
     encoder::varint_u32().encode(pdu, dst)
 }
 
-
-
 #[derive(Debug)]
-pub enum OpBlockReadCodec {
+pub enum OBR {
     Head(PduDecoder<VarIntU32Decoder, BlockOpResponseProto>),
     Chunk(PacketDecoder)
 }
 
-#[derive(Debug, PartialEq)]
-pub enum OpBlockReadMessage {
-    /// `Initial(has_data, m)`
-    Initial(bool, BlockOpResponseProto),
-    /// `Packet(m, is_last)`
-    Packet(BlockDataPacket, bool)
-}
-
-fn has_data(borp: &BlockOpResponseProto) -> bool {
-    pb_decons!(BlockOpResponseProto, borp, status) == DtStatus::SUCCESS
-}
-
-/// A generalization of `IoResult<Option<R>>`, adding `ReadyLast` variant signaling to end streaming
-/// mode and return to `Null` topleve mode
-#[derive(Debug)]
-enum DecoderResult<M> {
-    /// Message decoding complete, and this is not the last message in the streaming sequence
-    ReadyNotLast(M),
-    /// Message decoding complete, and this is the last message in the streaming sequence
-    ReadyLast(M),
-    /// Message decoding incomplete
-    NotReady,
-    /// Message decoding error
-    Err(Error),
-}
-
-impl OpBlockReadCodec {
-    pub fn new() -> OpBlockReadCodec {
-        OpBlockReadCodec::Head(decoder::varint_u32())
-    }
-
-    /// The initial response from a datanode, in the case of reads and writes:
-    /// ```text
-    /// +-----------------------------------------------------------+
-    /// |  varint length + BlockOpResponseProto                     |
-    /// +-----------------------------------------------------------+
-    /// ```
-    /// Chunks are Data transfer packets
-
-    fn decode(&mut self, src: &mut BytesMut) -> DecoderResult<OpBlockReadMessage> {
-        use self::OpBlockReadCodec as O;
-        use self::DecoderResult as R;
-        use util::*;
-
-        switch_state_t("OpBlockReadCodec", self,
-                       |s| match s {
-                           &mut O::Head(ref mut rdr) =>
-                               match rdr.decode(src) {
-                                   Ok(Some(w)) => if has_data(&w) {
-                                       SnV::SV(
-                                           O::Chunk(PacketDecoder::new()),
-                                           R::ReadyNotLast(OpBlockReadMessage::Initial(true, w)),
-                                       )
-                                   } else {
-                                       SnV::V(R::ReadyLast(OpBlockReadMessage::Initial(false, w)))
-                                   },
-                                   Ok(None) => SnV::V(R::NotReady),
-                                   Err(e) => SnV::V(R::Err(e))
-                               },
-                           &mut O::Chunk(ref mut rdr) =>
-                               match rdr.decode(src) {
-                                   Ok(Some(w)) => if w.is_last() {
-                                       SnV::V(R::ReadyLast(OpBlockReadMessage::Packet(w, true)))
-                                   } else {
-                                       SnV::SV(
-                                           O::Chunk(PacketDecoder::new()),
-                                           R::ReadyNotLast(OpBlockReadMessage::Packet(w, false)),
-                                       )
-                                   },
-                                   Ok(None) => SnV::V(R::NotReady),
-                                   Err(e) => SnV::V(R::Err(e))
-                               }
-                       },
-        )
+impl OBR {
+    pub fn new() -> OBR {
+        OBR::Head(decoder::varint_u32())
     }
 }
 
-
 #[derive(Debug)]
-pub enum OpBlockWriteCodec {
+pub enum OBW {
     Head(PduDecoder<VarIntU32Decoder, BlockOpResponseProto>),
-    Ack(PduDecoder<VarIntU32Decoder, PipelineAckProto>, i64)
+    Ack(PduDecoder<VarIntU32Decoder, PipelineAckProto>)
 }
 
-#[derive(Debug, PartialEq)]
-pub enum OpBlockWriteMessage {
-    Initial(bool, BlockOpResponseProto),
-    Ack(PipelineAckProto)
-}
-
-
-const UNKOWN_SEQNO: i64 = -1;
-
-impl OpBlockWriteCodec {
-    pub fn new() -> OpBlockWriteCodec {
-        OpBlockWriteCodec::Head(decoder::varint_u32())
-    }
-
-    /// The initial response from a datanode, in the case of reads and writes:
-    /// ```text
-    /// +-----------------------------------------------------------+
-    /// |  varint length + BlockOpResponseProto                     |
-    /// +-----------------------------------------------------------+
-    /// ```
-    /// Chunks are Data transfer packets
-
-    fn decode(&mut self, src: &mut BytesMut) -> DecoderResult<OpBlockWriteMessage> {
-        use self::OpBlockWriteCodec as O;
-        use self::DecoderResult as R;
-        use util::*;
-
-        switch_state_t("OpBlockWriteCodec", self,
-                       |s| match s {
-                           &mut O::Head(ref mut rdr) =>
-                               match rdr.decode(src) {
-                                   Ok(Some(w)) => if has_data(&w) {
-                                       SnV::SV(
-                                           O::Ack(decoder::varint_u32(), UNKOWN_SEQNO),
-                                           R::ReadyNotLast(OpBlockWriteMessage::Initial(true, w)),
-                                       )
-                                   } else {
-                                       SnV::V(R::ReadyLast(OpBlockWriteMessage::Initial(false, w)))
-                                   },
-                                   Ok(None) => SnV::V(R::NotReady),
-                                   Err(e) => SnV::V(R::Err(e))
-                               },
-                           &mut O::Ack(ref mut rdr, last_seqno) =>
-                               match rdr.decode(src) {
-                                   Ok(Some(w)) => if pb_get!(PipelineAckProto, w, seqno) == last_seqno {
-                                       SnV::V(R::ReadyLast(OpBlockWriteMessage::Ack(w)))
-                                   } else {
-                                       SnV::SV(
-                                           O::Ack(decoder::varint_u32(), last_seqno),
-                                           R::ReadyNotLast(OpBlockWriteMessage::Ack(w)),
-                                       )
-                                   },
-                                   Ok(None) => SnV::V(R::NotReady),
-                                   Err(e) => SnV::V(R::Err(e))
-                               }
-                       },
-        )
+impl OBW {
+    pub fn new() -> OBW {
+        OBW::Head(decoder::varint_u32())
     }
 }
-
-
 
 #[derive(Debug)]
 pub enum DtQ {
@@ -208,30 +78,19 @@ pub enum DtQ {
     Packet(BlockDataPacket)
 }
 
-/*
-impl DtQ {
-    pub fn set_client_name(&mut self, client_name: &str) {
-        match self {
-            &mut DtQ::ReadBlock(ref mut orbp) => orbp.mut_header().set_clientName(client_name.to_owned()),
-            &mut DtQ::WriteBlock(ref mut owbp) => owbp.mut_header().set_clientName(client_name.to_owned()),
-            &mut DtQ::Packet(..) => (),
-            &mut DtQ::ClientReadStatus(..) => ()
-        }
-    }
-}
-*/
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum DtR {
-    ReadBlock(OpBlockReadMessage),
-    WriteBlock(OpBlockWriteMessage)
+    ReadBlockResponse(BlockOpResponseProto),
+    Packet(BlockDataPacket),
+    WriteBlockResponse(BlockOpResponseProto),
+    Ack(PipelineAckProto)
 }
 
 #[derive(Debug)]
 pub enum DtCodec {
     Null,
-    OpBlockRead(OpBlockReadCodec),
-    OpBlockWrite(OpBlockWriteCodec)
+    OpBlockRead(OBR),
+    OpBlockWrite(OBW)
 }
 
 impl DtCodec {
@@ -245,37 +104,23 @@ impl Encoder for DtCodec {
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<()> {
         let (s, e) = match item {
             DtQ::ReadBlock(orbp) => (
-                Some(DtCodec::OpBlockRead(OpBlockReadCodec::new())),
+                Some(DtCodec::OpBlockRead(OBR::new())),
                 encode_generic_op(Op::ReadBlock, orbp, dst)
             ),
-
             DtQ::ClientReadStatus(crs) => (
                 Some(DtCodec::Null),
                 encoder::varint_u32().encode(crs, dst)
             ),
-
             DtQ::WriteBlock(owbp) => (
-                Some(DtCodec::OpBlockWrite(OpBlockWriteCodec::new())),
+                Some(DtCodec::OpBlockWrite(OBW::new())),
                 encode_generic_op(Op::WriteBlock, owbp, dst)
             ),
-
-            DtQ::Packet(bdp) => match self {
-                &mut DtCodec::OpBlockWrite(OpBlockWriteCodec::Ack(_, ref mut seqno)) => {
-                    //update sequence number
-                    *seqno = bdp.seq_no();
-                    (None, PacketEncoder::new().encode(bdp, dst))
-                }
-                _ => return Err(app_error!(codec "Invalid codec state: {:?}/Packet({:?})", self, bdp).into())
-            }
-
-            //_ => (
-            //    DtCodec::Null,
-            //    Err(app_error!(other "invalid operation on OpBlockReadCodec::encode"))
-            //),
-
+            DtQ::Packet(bdp) => (
+                None,
+                PacketEncoder::new().encode(bdp, dst)
+            )
         };
         if let Some(s) = s { *self = s };
-        //e.c_err()
         e
     }
 }
@@ -293,43 +138,42 @@ impl Decoder for DtCodec {
     /// Chunks are Data transfer packets
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        use self::DecoderResult as R;
+        //use self::DecoderResult as R;
 
-        if !src.is_empty() {
-            let (rv, goto_null) = match self {
-                &mut DtCodec::OpBlockRead(ref mut obrc) =>
-                    match obrc.decode(src) {
-                        R::ReadyNotLast(v) =>
-                            (Ok(Some(DtR::ReadBlock(v))), false),
-                        R::ReadyLast(v) =>
-                            (Ok(Some(DtR::ReadBlock(v))), true),
-                        R::NotReady =>
-                            (Ok(None), false),
-                        R::Err(e) =>
-                            (Err(e), true)
-                    },
-                &mut DtCodec::OpBlockWrite(ref mut obwc) =>
-                    match obwc.decode(src) {
-                        R::ReadyNotLast(v) =>
-                            (Ok(Some(DtR::WriteBlock(v))), false),
-                        R::ReadyLast(v) =>
-                            (Ok(Some(DtR::WriteBlock(v))), true),
-                        R::NotReady =>
-                            (Ok(None), false),
-                        R::Err(e) =>
-                            (Err(e), true)
-                    },
-                &mut DtCodec::Null =>
-                    (Err(app_error!(codec "DtCodec: invalid protocol state")), false)
-            };
-            //switch state to Null once finished with decoding
-            if goto_null {
-                *self = DtCodec::Null;
+        let rv = if !src.is_empty() {
+            match self {
+                DtCodec::OpBlockRead(OBR::Head(rdr)) =>
+                    rdr.decode(src).map(|o|
+                        o.map(|v| DtR::ReadBlockResponse(v))
+                    ),
+                DtCodec::OpBlockRead(OBR::Chunk(rdr)) =>
+                    rdr.decode(src).map(|o|
+                        o.map(|v| DtR::Packet(v))
+                    ),
+                DtCodec::OpBlockWrite(OBW::Head(rdr)) =>
+                    rdr.decode(src).map(|o|
+                        o.map(|v| DtR::WriteBlockResponse(v))
+                    ),
+                DtCodec::OpBlockWrite(OBW::Ack(rdr)) =>
+                    rdr.decode(src).map(|o|
+                        o.map(|v| DtR::Ack(v))
+                    ),
+                DtCodec::Null =>
+                    Err(app_error!(codec "DtCodec: invalid protocol state"))
             }
-            rv
         } else {
             Ok(None)
+        };
+
+        match &rv {
+            Ok(Some(DtR::ReadBlockResponse(..))) | Ok(Some(DtR::Packet(..)))  =>
+                *self = DtCodec::OpBlockRead(OBR::Chunk(PacketDecoder::new())),
+            Ok(Some(DtR::WriteBlockResponse(..))) | Ok(Some(DtR::Ack(..))) =>
+                *self = DtCodec::OpBlockWrite(OBW::Ack(decoder::varint_u32())),
+            _ => ()
         }
+
+        rv
     }
 }
 
@@ -338,14 +182,7 @@ impl Decoder for DtCodec {
 #[test]
 fn test_block_read_codec() {
     use util::test::*;
-    use self::DecoderResult as R;
-
-    fn not_last<W>(r: R<W>) -> Option<W> {
-        match r {
-            R::ReadyNotLast(w) => Some(w),
-            _ => None
-        }
-    }
+    use bytes::Bytes;
 
     let mut b = BytesMut::new();
     b.extend_from_slice(&//initial response
@@ -386,7 +223,7 @@ a9:c7:c0:1b
 00
 ".to_bytes());
 
-    let mut c = OpBlockReadCodec::new();
+    let mut c = DtCodec::OpBlockRead(OBR::new());
     //1C. Head(H(VarIntU32Decoder { cur: 0, bit: 0, pos: 0 }, FixedSizeDecoderTailF { f: 0x7ff7e37d1560 }))
     //println!("1C. {:?}", c);
 
@@ -404,8 +241,8 @@ a9:c7:c0:1b
     //1R. Ok(Some(InitialResponse(status: SUCCESS readOpChecksumInfo {checksum {type: CHECKSUM_CRC32C bytesPerChecksum: 512} chunkOffset: 0})))
     //println!("1R. {:?}", r);
     assert_eq!(
-        not_last(r),
-        Some(OpBlockReadMessage::Initial(true, pb_cons!(BlockOpResponseProto,
+        r.unwrap(),
+        Some(DtR::ReadBlockResponse(pb_cons!(BlockOpResponseProto,
             status: DtStatus::SUCCESS,
             read_op_checksum_info: pb_cons!(ReadOpChecksumInfoProto,
                 checksum: pb_cons!(ChecksumProto,
@@ -434,18 +271,18 @@ a9:c7:c0:1b
     //2R. Ok(Some(Packet(BlockDataPacket { header: offsetInBlock: 0 seqno: 0 lastPacketInBlock: false dataLen: 5, checksum: b"\xa9\xc7\xc0\x1b", data: b"ABCD\n" })))
     //println!("2R. {:?}", r);
     assert_eq!(
-        not_last(r),
+        r.unwrap(),
         Some(
-            OpBlockReadMessage::Packet(BlockDataPacket {
+            DtR::Packet(BlockDataPacket {
                 header: pb_cons!(PacketHeaderProto,
                     offset_in_block: 0,
                     seqno: 0,
                     last_packet_in_block: false,
                     data_len: 5
                 ),
-                checksum: BytesMut::from(vec![0xa9, 0xc7, 0xc0, 0x1b]),
-                data: BytesMut::from("ABCD\n")
-            }, false)
+                checksum: Bytes::from(vec![0xa9, 0xc7, 0xc0, 0x1b]),
+                data: Bytes::from("ABCD\n")
+            })
         )
     );
 
@@ -481,6 +318,104 @@ a9:c7:c0:1b
     //println!("5B. {}", HexSlice::new(&b[..]));
     assert!(b.is_empty());
 }
+
+
+#[test]
+fn test_block_write_codec() {
+    use util::test::*;
+    use bytes::Buf;
+    use std::io::Cursor;
+
+    //header {
+    // baseHeader {
+    //  block {
+    //   poolId: "BP-1914853243-127.0.0.1-1500467607052"
+    //   blockId: 1073742870
+    //   generationStamp: 2054
+    //   numBytes: 134217728
+    //  }
+    //  token {
+    //   identifier: ""
+    //   password: ""
+    //   kind: ""
+    //   service: ""
+    //  }
+    // }
+    // clientName: "DFSClient_NONMAPREDUCE_-484373823_1"
+    //}
+    //stage: PIPELINE_SETUP_CREATE
+    //pipelineSize: 1
+    //minBytesRcvd: 0
+    //maxBytesRcvd: 0
+    //latestGenerationStamp: 0
+    //requestedChecksum {type: CHECKSUM_CRC32C bytesPerChecksum: 512}
+    //cachingStrategy {}
+    //storageType: DISK
+    //allowLazyPersist: false
+
+    /*
+    00 1c 50 5d 0a 5b 0a 34 0a 32 0a 25 42 50 2d 31 39 31 34 38 35 33 32 34 33 2d 31 32 37
+    2e 30
+    */
+    let bs = "\
+    00:1c:50:85:01:0a:68:0a:41:0a:35:0a:25:42:50:2d:31:39:31:34:38:35:33:32:34:33:2d:31:32:37:\
+    2e:30:2e:30:2e:31:2d:31:35:30:30:34:36:37:36:30:37:30:35:32:10:96:88:80:80:04:18:86:10:20:\
+    80:80:80:40:12:08:0a:00:12:00:1a:00:22:00:12:23:44:46:53:43:6c:69:65:6e:74:5f:4e:4f:4e:4d:\
+    41:50:52:45:44:55:43:45:5f:2d:34:38:34:33:37:33:38:32:33:5f:31:20:06:28:01:30:00:38:00:40:\
+    00:4a:05:08:02:10:80:04:52:00:58:01:68:00:70:00:78:00"
+        .to_bytes();
+
+    let _ = "\
+    00 1c 50 75 0a 5e 0a 37 0a 35 0a 25 42 50 2d 31 39 31 34 38 35 33 32 34 33 2d 31 32 37 2e 30
+    2e 30 2e 31 2d 31 35 30 30 34 36 37 36 30 37 30 35 32 10 96 88 80 80 04 18 86 10 20 80 80 80
+    40 12 23 44 46 53 43 6c 69 65 6e 74 5f 4e 4f 4e 4d 41 50 52 45 44 55 43 45 5f 2d 34 38 34 33
+    37 33 38 32 33 5f 31 20 06 28 01 30 00 38 00 40 00 4a 05 08 02 10 80 04 58 01 68 00
+    ";
+
+    fn dt_parse_serverside<T: PduDes + std::fmt::Debug>(b: Vec<u8>, op: Op) -> T {
+        let mut bx = Cursor::new(b);
+        assert_eq!(bx.get_u16::<BigEndian>(), DATA_TRANSFER_VERSION);
+        assert_eq!(bx.get_u8(), op as u8);
+        let mut bm = BytesMut::from(bx.into_inner().split_off(3));
+        let mut dec: PduDecoder<VarIntU32Decoder, T> = decoder::varint_u32();
+        let result: Result<Option<T>> = dec.decode(&mut bm);
+        result.unwrap().unwrap()
+    }
+
+    let _ = dt_parse_serverside::<OpWriteBlockProto>(bs, Op::WriteBlock);
+    //println!("R: {:?}", _);
+
+    let mut c = DtCodec::new();
+    let mut b = BytesMut::new();
+    let owbp = pb_cons!(OpWriteBlockProto,
+        header: pb_cons!(ClientOperationHeaderProto,
+            base_header: pb_cons!(BaseHeaderProto,
+                block: pb_cons!(ExtendedBlockProto,
+                    pool_id: "BP-1914853243-127.0.0.1-1500467607052".to_owned(),
+                    block_id: 1073742870,
+                    generation_stamp: 2054,
+                    num_bytes: 134217728
+                )
+            ),
+            client_name: "DFSClient_NONMAPREDUCE_-484373823_1".to_owned()
+        ),
+        stage: OpWriteBlockProto_BlockConstructionStage::PIPELINE_SETUP_CREATE,
+        pipeline_size: 1,
+        min_bytes_rcvd: 0,
+        max_bytes_rcvd: 0,
+        latest_generation_stamp: 0,
+        requested_checksum: pb_cons!(ChecksumProto,
+           type: ChecksumTypeProto::CHECKSUM_CRC32C,
+            bytes_per_checksum: 512
+        ),
+        storage_type: StorageTypeProto::DISK,
+        allow_lazy_persist: false
+    );
+    c.encode(DtQ::WriteBlock(owbp), &mut b).unwrap();
+
+    println!("{:?}", HexSlice(&b[..]));
+}
+
 //-------------------------------------------------------------------------------------------------
 // Old impl
 
